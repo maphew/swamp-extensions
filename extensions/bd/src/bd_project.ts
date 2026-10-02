@@ -38,6 +38,7 @@ const IssueSchema = z.object({
   dependencyCount: z.number().int().default(0),
   dependentCount: z.number().int().default(0),
   commentCount: z.number().int().default(0),
+  truncated: z.boolean().default(false),
 });
 
 /** Arguments for the `create` method. */
@@ -220,6 +221,7 @@ function normalizeIssue(
     dependencyCount: Number(raw.dependency_count ?? 0),
     dependentCount: Number(raw.dependent_count ?? 0),
     commentCount: Number(raw.comment_count ?? 0),
+    truncated: false,
   };
 }
 
@@ -271,7 +273,9 @@ async function listIssues(
   const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
   const parsed = ListArgsSchema.parse(args);
 
-  const bdArgs = ["list", "--json"];
+  // bd caps at 50 server-side by default, so probe one past the caller's limit:
+  // that makes `truncated` accurate instead of silently under-reporting.
+  const bdArgs = ["list", "--json", "--limit", String(parsed.limit + 1)];
   if (parsed.status) bdArgs.push("--status", parsed.status);
   if (parsed.type) bdArgs.push("--type", parsed.type);
   if (parsed.assignee) bdArgs.push("--assignee", parsed.assignee);
@@ -284,11 +288,13 @@ async function listIssues(
     ctx.logger,
   );
 
-  const issues = (JSON.parse(stdout) as Record<string, unknown>[])
+  const all = (JSON.parse(stdout) as Record<string, unknown>[])
     .map((raw) =>
       normalizeIssue(raw, cfg, { status: "open", issueType: cfg.defaultType })
-    )
-    .slice(0, parsed.limit);
+    );
+  const issues = all.slice(0, parsed.limit);
+  const truncated = all.length > issues.length;
+  for (const issue of issues) issue.truncated = truncated;
 
   const handles: Array<{ name: string }> = [];
   for (const issue of issues) {
@@ -298,8 +304,12 @@ async function listIssues(
   }
 
   ctx.logger.info(
-    "Listed {count} bd issues",
-    { count: issues.length },
+    "Listed {count} bd issues (limit {limit}{truncated})",
+    {
+      count: issues.length,
+      limit: parsed.limit,
+      truncated: truncated ? ", truncated" : "",
+    },
   );
   return { dataHandles: handles };
 }
@@ -311,7 +321,8 @@ async function readyIssues(
   const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
   const parsed = ReadyArgsSchema.parse(args);
 
-  const bdArgs = ["ready", "--json"];
+  // Probe one past the caller's limit so `truncated` reflects bd's real cap.
+  const bdArgs = ["ready", "--json", "--limit", String(parsed.limit + 1)];
   if (parsed.assignee) bdArgs.push("--assignee", parsed.assignee);
 
   const { stdout } = await runBdStrict(
@@ -322,11 +333,13 @@ async function readyIssues(
     ctx.logger,
   );
 
-  const issues = (JSON.parse(stdout) as Record<string, unknown>[])
+  const all = (JSON.parse(stdout) as Record<string, unknown>[])
     .map((raw) =>
       normalizeIssue(raw, cfg, { status: "open", issueType: cfg.defaultType })
-    )
-    .slice(0, parsed.limit);
+    );
+  const issues = all.slice(0, parsed.limit);
+  const truncated = all.length > issues.length;
+  for (const issue of issues) issue.truncated = truncated;
 
   const handles: Array<{ name: string }> = [];
   for (const issue of issues) {
@@ -335,7 +348,14 @@ async function readyIssues(
     );
   }
 
-  ctx.logger.info("Found {count} ready bd issues", { count: issues.length });
+  ctx.logger.info(
+    "Found {count} ready bd issues (limit {limit}{truncated})",
+    {
+      count: issues.length,
+      limit: parsed.limit,
+      truncated: truncated ? ", truncated" : "",
+    },
+  );
   return { dataHandles: handles };
 }
 
@@ -453,7 +473,7 @@ async function closeIssue(
 /** Swamp model definition for the beads issue tracker bridge. */
 export const model = {
   type: "@maphew/bd",
-  version: "2026.10.02.2",
+  version: "2026.10.02.3",
   globalArguments: GlobalArgsSchema,
   checks: {
     "bd-usable": {
@@ -487,7 +507,7 @@ export const model = {
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
     {
-      toVersion: "2026.10.02.2",
+      toVersion: "2026.10.02.3",
       description:
         "Source moved to maphew/swamp-extensions (AGPL-3.0); no schema or method changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,

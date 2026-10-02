@@ -1,0 +1,28 @@
+{
+  "extension": "@maphew/bd",
+  "version": "2026.10.02.3",
+  "reviewedAt": "2026-10-02T23:52:00Z",
+  "dimensions": [
+    { "id": "credentials-secrets", "verdict": "pass", "note": "No credential or secret handling. Global args are paths and non-sensitive defaults; no vault refs needed." },
+    { "id": "logging-quality", "verdict": "pass", "note": "All logging uses structured placeholders (Listed {count}, bd {method} failed (exit {code}: {detail})). No interpolation. Failures log at error, completions at info." },
+    { "id": "error-handling", "verdict": "issue", "note": "Four bare JSON.parse calls on bd stdout (lines 243, 291, 336, 409) throw a raw SyntaxError with no indication of which bd subcommand produced the unparseable output. runBdStrict already returns stdout; parsing should be wrapped so the error names the method. Non-blocking: bd --json is stable and every failure path already throws before writeResource." },
+    { "id": "testing-completeness", "verdict": "pass", "note": "Five tests cover the create/show/update/close round-trip, list and ready, truncation flagging, update arg validation, and CLI failure surfacing (exit code + stderr). Failure path is covered by a real nonexistent-ID call." },
+    { "id": "idempotency-resilience", "verdict": "issue", "note": "create is not idempotent: a re-run creates a second issue. bd has no --idempotency-key flag on create, so this cannot be fixed in the model without deduplicating on title via externalRef. close is idempotent (bd close on a closed issue succeeds) and update --claim is documented idempotent by bd. Non-blocking; documented rather than changed." },
+    { "id": "api-contracts", "verdict": "pass", "note": "Verified against the live CLI: bd list/ready accept --limit (defaults 50 and 100 respectively), bd update accepts --claim/--title/-d/-s/-p/-a/--add-label/--remove-label, bd close accepts --reason. bd show --json wraps the record in a single-element array, which fetchIssue handles." },
+    { "id": "resource-management", "verdict": "pass", "note": "Deno.Command().output() fully drains and closes pipes on every call. No open handles, no temp files created by the model. The bd-usable check also uses output()." },
+    { "id": "published-surface-hygiene", "verdict": "pass", "note": "README examples use bd-123 placeholders and my-tracker. No real hostnames, IPs, or account identifiers in README, tests, or fixtures." },
+    { "id": "schema-strictness", "verdict": "pass", "note": "All schemas use z.object with no passthrough. IssueSchema is strict, so CEL expression validation works." },
+    { "id": "lifetime-gc", "verdict": "pass", "note": "The single issue spec sets lifetime 30d and garbageCollection 10, appropriate for high-churn list/ready output." },
+    { "id": "crud-completeness", "verdict": "issue", "note": "No delete or sync method. Beads has no delete (closure is terminal) and the model is a live projection of the bd database, so sync is what list/ready already do. Intentional for this domain, not a gap." },
+    { "id": "preflight-checks", "verdict": "pass", "note": "The bd-usable check runs bd --version from bdDir and fails with the exit code and stderr, labeled dependency so mutating methods skip cleanly when the CLI is absent." },
+    { "id": "instance-names", "verdict": "pass", "note": "All six methods write spec issue with instance issue-<bd-id>. Unique per issue, no collisions, consistent shape across every writer." },
+    { "id": "data-access", "verdict": "pass", "note": "No direct dataRepository access. update and close re-fetch through fetchIssue (bd show) rather than reading stale stored state, which is correct for a projection of an external CLI database." },
+    { "id": "version-upgrades", "verdict": "pass", "note": "An upgrades entry exists for every published version including 2026.10.02.3, each a no-op attribute passthrough since no global argument schema changed." }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — IssueSchema has 13 fields; normalizeIssue writes all 13; closeIssue spreads the fetched issue and overrides only status and updatedAt. No placeholder writes.",
+    "truncation-honesty": "FIXED — list and ready capped at limit with no truncated field on the spec, and relied on bd's own default cap (50 for list, 100 for ready), so a limit of 200 would silently return 50. Added truncated to IssueSchema, set it on every returned issue, and pass --limit <limit+1> to bd so the flag reflects bd's real cap. Covered by a new test.",
+    "instance-name-consistency": "pass — all writers emit issue-<bd-id> against spec issue with identical schema shape.",
+    "schema-field-coverage": "pass — 13 of 13 schema fields written; the three count fields have code paths populating them from bd's dependency_count/dependent_count/comment_count."
+  }
+}

@@ -7,7 +7,12 @@
  * @module
  */
 
-import { assert, assertEquals, assertStringIncludes, assertThrows } from "jsr:@std/assert@1";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "jsr:@std/assert@1";
 import { model } from "./bd_project.ts";
 
 type Issue = Record<string, unknown>;
@@ -138,6 +143,31 @@ Deno.test("@maphew/bd list and ready return issues", async () => {
     const readyIssues = [...ctx.written.values()];
     assertEquals(ready.dataHandles?.length, readyIssues.length);
     assert(readyIssues.some((i) => i.title === "ready probe"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd list flags truncation when over the limit", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    for (let i = 0; i < 3; i++) {
+      await runMethod("create", { title: `probe ${i}`, type: "task" }, ctx);
+    }
+
+    ctx.written.clear();
+    await runMethod("list", { limit: 2 }, ctx);
+    const capped = [...ctx.written.values()];
+    assertEquals(capped.length, 2);
+    // every returned issue reports that the result set was capped
+    assert(capped.every((i) => i.truncated === true));
+
+    ctx.written.clear();
+    await runMethod("list", { limit: 10 }, ctx);
+    const uncapped = [...ctx.written.values()];
+    assertEquals(uncapped.length, 3);
+    assert(uncapped.every((i) => i.truncated === false));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

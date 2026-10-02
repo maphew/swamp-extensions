@@ -46,6 +46,11 @@ swamp model method run @maphew/bd close my-tracker \
 Every method writes normalized issue resources (`spec: issue`), so results are
 queryable with `swamp data query` and referenceable from CEL expressions.
 
+`list` and `ready` take a `limit` (default 50, max 500) and set `truncated:
+true` on every returned issue when more matched than the limit allowed. The
+model passes `--limit <limit + 1>` to `bd` so the flag reflects bd's real cap
+rather than its own 50-row default.
+
 ## Global arguments
 
 | Arg               | Default | Description                                            |
