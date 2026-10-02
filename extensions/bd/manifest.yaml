@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/bd"
-version: "2026.10.02.1"
+version: "2026.10.02.2"
 description: "Beads (bd) issue tracker bridge — list, ready, show, create, update, and close issues via the local bd CLI."
 repository: "https://github.com/maphew/swamp-extensions.git"
 paths:

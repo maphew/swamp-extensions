@@ -453,7 +453,7 @@ async function closeIssue(
 /** Swamp model definition for the beads issue tracker bridge. */
 export const model = {
   type: "@maphew/bd",
-  version: "2026.09.29.3",
+  version: "2026.10.02.2",
   globalArguments: GlobalArgsSchema,
   checks: {
     "bd-usable": {
@@ -484,6 +484,12 @@ export const model = {
       toVersion: "2026.09.29.3",
       description:
         "Add ready/update methods and structured error diagnostics; no global argument schema changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.02.2",
+      description:
+        "Source moved to maphew/swamp-extensions (AGPL-3.0); no schema or method changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
