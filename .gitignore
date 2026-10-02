@@ -1,0 +1,11 @@
+# swamp runtime data
+.swamp/
+
+# local extension source overrides
+.swamp-sources.yaml
+
+# local Deno/npm caches used while typechecking package sources
+node_modules/
+deno.lock
+
+.DS_Store
