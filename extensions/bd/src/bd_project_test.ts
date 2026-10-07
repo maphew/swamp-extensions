@@ -173,6 +173,124 @@ Deno.test("@maphew/bd list flags truncation when over the limit", async () => {
   }
 });
 
+Deno.test("@maphew/bd query filters by expression", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    await runMethod("create", { title: "query bug probe", type: "bug" }, ctx);
+    await runMethod("create", { title: "query task probe", type: "task" }, ctx);
+
+    ctx.written.clear();
+    const queried = await runMethod(
+      "query",
+      { q: "type=bug" },
+      ctx,
+    );
+    const bugs = [...ctx.written.values()];
+    assertEquals(queried.dataHandles?.length, 1);
+    assertEquals(bugs.length, 1);
+    assertEquals(bugs[0].issueType, "bug");
+    assertEquals(bugs[0].truncated, false);
+
+    ctx.written.clear();
+    await runMethod("query", { q: "type=bug AND priority=2" }, ctx);
+    assertEquals([...ctx.written.values()].length, 1);
+
+    ctx.written.clear();
+    await runMethod("query", { q: "type=bug AND priority=4" }, ctx);
+    assertEquals([...ctx.written.values()].length, 0);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd query flags truncation and passes limit", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    for (let i = 0; i < 3; i++) {
+      await runMethod("create", { title: `query cap probe ${i}`, type: "task" }, ctx);
+    }
+
+    ctx.written.clear();
+    await runMethod("query", { q: "type=task", limit: 2 }, ctx);
+    const capped = [...ctx.written.values()];
+    assertEquals(capped.length, 2);
+    assert(capped.every((i) => i.truncated === true));
+
+    ctx.written.clear();
+    await runMethod("query", { q: "type=task", limit: 10 }, ctx);
+    const uncapped = [...ctx.written.values()];
+    assertEquals(uncapped.length, 3);
+    assert(uncapped.every((i) => i.truncated === false));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd query excludes closed until includeClosed", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    const created = await runMethod(
+      "create",
+      { title: "close me", type: "bug" },
+      ctx,
+    );
+    const id = [...ctx.written.values()].at(-1)!.id as string;
+    await runMethod("close", { id }, ctx);
+
+    ctx.written.clear();
+    await runMethod("query", { q: "type=bug" }, ctx);
+    assertEquals([...ctx.written.values()].length, 0);
+
+    ctx.written.clear();
+    await runMethod(
+      "query",
+      { q: "type=bug", includeClosed: true },
+      ctx,
+    );
+    const reopened = [...ctx.written.values()];
+    assertEquals(reopened.length, 1);
+    assertEquals(reopened[0].id, id);
+    assertEquals(reopened[0].status, "closed");
+    assert(created.dataHandles !== undefined);
+
+    ctx.written.clear();
+    await runMethod(
+      "query",
+      { q: "type=bug", includeClosed: true, sort: "priority" },
+      ctx,
+    );
+    assertEquals([...ctx.written.values()].length, 1);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd query requires an expression", () => {
+  assertThrows(
+    () => model.methods.query.arguments.parse({}),
+  );
+});
+
+Deno.test("@maphew/bd query surfaces invalid expressions", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    let caught: unknown;
+    try {
+      await runMethod("query", { q: "type:bug" }, ctx);
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught instanceof Error);
+    assertStringIncludes(caught.message, "bd query failed (exit");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("@maphew/bd update requires a field", () => {
   assertThrows(
     () =>

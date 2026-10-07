@@ -24,6 +24,7 @@ swamp model create @maphew/bd my-tracker
 | Method   | Purpose                                                        |
 | -------- | -------------------------------------------------------------- |
 | `list`   | List issues with optional status/type/assignee filters         |
+| `query`  | Filter issues with bd's query language (`status=open AND type=bug`) |
 | `ready`  | List issues ready to work (no active blockers)                 |
 | `show`   | Show one issue by ID                                           |
 | `create` | Create an issue (title, type, priority, labels, parent, ...)   |
@@ -41,15 +42,29 @@ swamp model method run @maphew/bd update my-tracker \
 # Close with a reason
 swamp model method run @maphew/bd close my-tracker \
   --input '{"id":"bd-123","reason":"shipped in PR #9"}'
+
+# Rich filtering via bd's query language (--json under the hood)
+swamp model method run @maphew/bd query my-tracker \
+  --input '{"q":"status=open AND type=bug","limit":20}'
+
+# Include closed issues (bd excludes them by default)
+swamp model method run @maphew/bd query my-tracker \
+  --input '{"q":"priority<=1","includeClosed":true,"sort":"updated"}'
 ```
 
 Every method writes normalized issue resources (`spec: issue`), so results are
 queryable with `swamp data query` and referenceable from CEL expressions.
 
-`list` and `ready` take a `limit` (default 50, max 500) and set `truncated:
+`list`, `query`, and `ready` take a `limit` (default 50, max 500) and set `truncated:
 true` on every returned issue when more matched than the limit allowed. The
 model passes `--limit <limit + 1>` to `bd` so the flag reflects bd's real cap
 rather than its own 50-row default.
+
+`query` runs `bd query --json` with the expression from `q` (required). Comparisons
+are `field=value`/`!=`/`<`/`<=`/`>`/`>=` combined with `AND`/`OR`/`NOT` and
+parentheses — bd's colon syntax (`status:open`) is not valid query language.
+bd excludes closed issues unless `includeClosed: true` (the `--all` flag), so
+`{"q":"status=closed"}` needs it to match anything.
 
 ## Global arguments
 

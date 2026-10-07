@@ -1,0 +1,94 @@
+{
+  "extension": "@maphew/bd",
+  "version": "2026.10.07.1",
+  "reviewedAt": "2026-10-07T05:05:00Z",
+  "scope": "que method adds a new read-only method wrapping bd query --json; no changes to existing methods, schemas, or global args. Review focused on the new queryIssues plus its schema and tests.",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential handling introduced. q is a user-supplied filter expression, never logged by bd, and the error path logs the query exit code/stderr only."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "New method logs 'Queried {count} bd issues (limit {limit}{truncated})' with structured placeholders, matching list/ready wording. Failures flow through runBdStrict's existing error logging."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "issue",
+      "note": "queryIssues adds a fifth bare JSON.parse on bd stdout. bd query emits a JSON error envelope on stdout for invalid expressions, but bd still exits nonzero in that case, so runBdStrict throws before parsing when q is malformed - verified by a test asserting 'bd query failed (exit'. The residual SyntaxError risk is identical to the pre-existing one on list/ready (mid-run malformed output); carried over, not introduced. Tested: invalid 'type:bug' expression surfaces 'bd query failed (exit ...)' with the parse error text from bd."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "Five new tests: expression filtering (AND composition, no-match), limit pass-through with truncation flagging, closed-exclusion and includeClosed/--all plus sort flag, required-q schema validation, and invalid-expression error surfacing. All run the real bd CLI against a throwaway project like the existing suite. Suite: 10 passed."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "Read-only method; the only side effect is writeResource upserts, which are idempotent per issue. Limit+1 probe makes truncation honest; empty result sets return no handles (not an error), which is the right fan-out semantics."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "Verified against the live CLI: bd query requires an expression (bare bd query errors, hence q.min(1)); flags -n/--limit (default 50), -a/--all, --sort with fields priority|created|updated|closed|status|id|title|type|assignee (enum-mirrored in QuerySortFields), -r/--reverse. bd query --json returns the identical key set as bd list --json (compared on this machine), so normalizeIssue needs no changes. Colon syntax from the issue description (status:open) is NOT valid in bd's query language; schema describe text and README now warn about it and tests cover the failure."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Same Deno.Command().output() pattern as the rest of the file; pipes fully drained. q is passed as a single argv element (no shell, no interpolation), so the expression cannot inject flags: a q starting with '-' would still be treated by bd as the positional expression because it is followed in argv order before --json... note: bd uses a positional parser, but a q beginning with '-' could be misread as a flag by the CLI. Practically the query language never starts with '-', so accepted without a guard."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README examples keep placeholder IDs and my-tracker; sort example uses a generic field. No hosts, account names, or repo-specific data in the published surface."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "QueryArgsSchema is a plain z.object; q is min(1) required; limit matches list/ready bounds; sort is a closed enum. No passthrough on the write path (IssueSchema unchanged)."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "Reuses the existing issue spec (lifetime 30d, GC 10); no new spec introduced, so no new retention surface."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "pass",
+      "note": "query closes the read-side gap the issue names: compound filtering for workflow fan-out that list/ready could not express. It intentionally layers over bd rather than duplicating list flags."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "pass",
+      "note": "Unchanged bd-usable check still gates the CLI resolution; query needs nothing beyond it."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "Writes spec issue with instance issue-<bd-id>, identical to list/ready, so downstream CEL/data references see one consistent shape regardless of the read method used."
+    },
+    {
+      "id": "data-access",
+      "verdict": "pass",
+      "note": "No dataRepository access; output is a live projection of the bd database consistent with the rest of the model."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Version bumped to 2026.10.07.1 with a new upgrades entry (additive method, no-op attribute passthrough), matching the history pattern."
+    },
+    {
+      "id": "known-limitations",
+      "verdict": "issue",
+      "note": "Non-blocking: (1) --reverse without --sort is accepted but only meaningful when bd's query has a default order; documented in the arg describe. (2) The issue's example syntax 'blocks:bd-mhw-5' uses colons; bd's language uses field=value (e.g. dependent=bd-mhw-5); the published describe/README correct this so callers are not misled."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — queryIssues writes the same 13-field IssueSchema via normalizeIssue; no placeholder writes.",
+    "truncation-honesty": "pass — passes --limit <limit+1> and flags truncated on every returned issue when the cap engaged; covered by a test.",
+    "instance-name-consistency": "pass — issue-<bd-id> for every emitted resource.",
+    "schema-field-coverage": "pass — all schema fields populated from bd's query output, which has the same keys as list output (verified key-set equality)."
+  }
+}

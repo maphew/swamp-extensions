@@ -7,6 +7,7 @@
  *
  * Methods:
  *   - `list`   list issues (with optional filters)
+ *   - `query`  filter issues with bd's query language (e.g. "status=open AND type=bug")
  *   - `show`   show details for one issue by ID
  *   - `ready`  list issues ready to work (no active blockers)
  *   - `create` create a new issue
@@ -65,6 +66,38 @@ const ListArgsSchema = z.object({
   assignee: z.string().optional().describe("Filter by assignee"),
   limit: z.number().int().min(1).max(500).default(50).describe(
     "Maximum issues to return",
+  ),
+});
+
+/** Sort fields accepted by `bd query --sort`. */
+const QuerySortFields = [
+  "priority",
+  "created",
+  "updated",
+  "closed",
+  "status",
+  "id",
+  "title",
+  "type",
+  "assignee",
+] as const;
+
+/** Arguments for the `query` method. */
+const QueryArgsSchema = z.object({
+  q: z.string().min(1).describe(
+    'bd query language expression, e.g. "status=open AND type=bug" or "priority<=1 AND label=swarm". Comparisons use =, !=, <, <=, >, >= with AND/OR/NOT and parentheses; bd\'s colon syntax (status:open) is not supported',
+  ),
+  limit: z.number().int().min(1).max(500).default(50).describe(
+    "Maximum issues to return",
+  ),
+  includeClosed: z.boolean().default(false).describe(
+    "Include closed issues (bd excludes them by default; needed for status=closed queries)",
+  ),
+  sort: z.enum(QuerySortFields).optional().describe(
+    "Sort by field (bd's default order otherwise)",
+  ),
+  reverse: z.boolean().default(false).describe(
+    "Reverse sort order (has no effect unless sort is set)",
   ),
 });
 
@@ -139,6 +172,8 @@ type Issue = z.infer<typeof IssueSchema>;
 type CreateArgs = z.infer<typeof CreateArgsSchema>;
 /** Validated `list` arguments. */
 type ListArgs = z.infer<typeof ListArgsSchema>;
+/** Validated `query` arguments. */
+type QueryArgs = z.infer<typeof QueryArgsSchema>;
 /** Validated `close` arguments. */
 type CloseArgs = z.infer<typeof CloseArgsSchema>;
 /** Validated `update` arguments. */
@@ -359,6 +394,59 @@ async function readyIssues(
   return { dataHandles: handles };
 }
 
+async function queryIssues(
+  args: Record<string, unknown>,
+  ctx: MethodCtx,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const parsed = QueryArgsSchema.parse(args);
+
+  // Probe one past the caller's limit so `truncated` reflects bd's real cap.
+  const bdArgs = [
+    "query",
+    parsed.q,
+    "--json",
+    "--limit",
+    String(parsed.limit + 1),
+  ];
+  if (parsed.includeClosed) bdArgs.push("--all");
+  if (parsed.sort) bdArgs.push("--sort", parsed.sort);
+  if (parsed.reverse) bdArgs.push("--reverse");
+
+  const { stdout } = await runBdStrict(
+    "query",
+    cfg.bdCommand,
+    bdArgs,
+    cfg.bdDir,
+    ctx.logger,
+  );
+
+  const all = (JSON.parse(stdout) as Record<string, unknown>[])
+    .map((raw) =>
+      normalizeIssue(raw, cfg, { status: "open", issueType: cfg.defaultType })
+    );
+  const issues = all.slice(0, parsed.limit);
+  const truncated = all.length > issues.length;
+  for (const issue of issues) issue.truncated = truncated;
+
+  const handles: Array<{ name: string }> = [];
+  for (const issue of issues) {
+    handles.push(
+      await ctx.writeResource("issue", `issue-${issue.id}`, issue),
+    );
+  }
+
+  ctx.logger.info(
+    "Queried {count} bd issues (limit {limit}{truncated})",
+    {
+      count: issues.length,
+      limit: parsed.limit,
+      truncated: truncated ? ", truncated" : "",
+    },
+  );
+  return { dataHandles: handles };
+}
+
 async function showIssue(
   args: Record<string, unknown>,
   ctx: MethodCtx,
@@ -473,7 +561,7 @@ async function closeIssue(
 /** Swamp model definition for the beads issue tracker bridge. */
 export const model = {
   type: "@maphew/bd",
-  version: "2026.10.02.3",
+  version: "2026.10.07.1",
   globalArguments: GlobalArgsSchema,
   checks: {
     "bd-usable": {
@@ -512,6 +600,12 @@ export const model = {
         "Source moved to maphew/swamp-extensions (AGPL-3.0); no schema or method changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
+    {
+      toVersion: "2026.10.07.1",
+      description:
+        "Add query method (bd query language filtering); no changes to existing methods or resources",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
   ],
   resources: {
     issue: {
@@ -529,6 +623,15 @@ export const model = {
         args: Record<string, unknown>,
         ctx: Parameters<typeof listIssues>[1],
       ) => listIssues(args, ctx),
+    },
+    query: {
+      description:
+        'Filter BD issues with bd\'s query language (e.g. "status=open AND type=bug")',
+      arguments: QueryArgsSchema,
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Parameters<typeof queryIssues>[1],
+      ) => queryIssues(args, ctx),
     },
     ready: {
       description: "List BD issues ready to work (no active blockers)",
