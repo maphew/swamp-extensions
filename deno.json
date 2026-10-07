@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    "check": "deno check extensions/bd/src/",
+    "test": "deno test --allow-read --allow-write --allow-run --allow-env --allow-net extensions/bd/src/"
+  }
+}
