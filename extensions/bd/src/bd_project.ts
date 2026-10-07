@@ -13,6 +13,11 @@
  *   - `create` create a new issue
  *   - `update` edit fields, claim, or relabel an issue
  *   - `close`  close an issue by ID (preserves the issue's real fields)
+ *   - `reopen` reopen one or more closed issues, optionally with a reason
+ *   - `dep`    manage dependencies: add, remove, or list them
+ *   - `reclaim` revert stale in_progress issues back to open (dead-worker recovery)
+ *   - `graph`  return the dependency graph as structured nodes, typed edges,
+ *              and layers (ready for rendering as a Mermaid graph)
  *
  * Failures throw with the bd exit code, stderr, and stdout so failed
  * method runs are diagnosable from reports and workflow logs.
@@ -148,6 +153,85 @@ const CloseArgsSchema = z.object({
   reason: z.string().optional().describe("Closure reason"),
 });
 
+/** Arguments for the `dep` method. */
+const DepArgsSchema = z.object({
+  action: z.enum(["add", "remove", "list"]).default("list").describe(
+    "Dependency action: add makes issueId depend on dependsOnId, remove unlinks them, list returns the dependency issues",
+  ),
+  issueId: z.string().describe(
+    "Issue ID (e.g., bd-mhw-1); for add/remove the side that depends on dependsOnId",
+  ),
+  dependsOnId: z.string().optional().describe(
+    "The issue that issueId depends on (required for add/remove)",
+  ),
+  direction: z.enum(["down", "up"]).default("down").describe(
+    "List direction: down = what issueId depends on, up = what depends on issueId (list only)",
+  ),
+}).refine(
+  (args) => args.action === "list" || args.dependsOnId !== undefined,
+  { message: "dependsOnId is required for add/remove" },
+);
+
+/** Arguments for the `reopen` method. */
+const ReopenArgsSchema = z.object({
+  ids: z.array(z.string()).min(1).describe("Issue IDs to reopen"),
+  reason: z.string().optional().describe("Reason for reopening"),
+});
+
+/** Arguments for the `reclaim` method. */
+const ReclaimArgsSchema = z.object({
+  ids: z.array(z.string()).optional().describe(
+    "Only reclaim these issue IDs",
+  ),
+  maxAge: z.string().optional().describe(
+    "Grace window past lease expiry, e.g. 10m or 1h; defaults to bd's own (10m)",
+  ),
+});
+
+/** Schema for a dependency-graph node. */
+const GraphNodeSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  status: z.string(),
+});
+
+/** Schema for a typed dependency edge: `from` depends on `to` via `type`. */
+const GraphEdgeSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  type: z.string(),
+});
+
+/** Schema for the dependency graph resource. */
+const DependencyGraphSchema = z.object({
+  rootId: z.string().nullable().describe(
+    "Issue the graph was anchored at, or null when all open issues were graphed",
+  ),
+  nodes: z.array(GraphNodeSchema).describe("Issues participating in the graph"),
+  edges: z.array(GraphEdgeSchema).describe("Typed edges: from depends on to"),
+  layers: z.array(z.array(z.string())).nullable().describe(
+    "Dependency layers in execution order (layer 0 = can start immediately); null when the graph has no layering",
+  ),
+});
+
+/** Arguments for the `graph` method. */
+const GraphArgsSchema = z.object({
+  rootId: z.string().optional().describe(
+    "Anchor the graph at this issue; omit to graph all open issues",
+  ),
+  direction: z.enum(["downstream", "upstream", "both"]).default(
+    "downstream",
+  ).describe(
+    "downstream = what the root depends on, upstream = what depends on the root (requires rootId), both = the union",
+  ),
+  depth: z.number().int().min(-1).default(-1).describe(
+    "Maximum hops from rootId to include (-1 = unlimited; ignored when rootId is omitted)",
+  ),
+}).refine(
+  (args) => args.direction === "downstream" || args.rootId !== undefined,
+  { message: "direction upstream/both requires rootId" },
+);
+
 /** Global arguments configuring how the bd CLI is invoked. */
 const GlobalArgsSchema = z.object({
   bdCommand: z.string().default("bd").describe(
@@ -178,6 +262,14 @@ type QueryArgs = z.infer<typeof QueryArgsSchema>;
 type CloseArgs = z.infer<typeof CloseArgsSchema>;
 /** Validated `update` arguments. */
 type UpdateArgs = z.infer<typeof UpdateArgsSchema>;
+/** Validated `dep` arguments. */
+type DepArgs = z.infer<typeof DepArgsSchema>;
+/** Validated `reopen` arguments. */
+type ReopenArgs = z.infer<typeof ReopenArgsSchema>;
+/** Validated `reclaim` arguments. */
+type ReclaimArgs = z.infer<typeof ReclaimArgsSchema>;
+/** Validated `graph` arguments. */
+type GraphArgs = z.infer<typeof GraphArgsSchema>;
 
 // ---------- helpers ---------------------------------------------------------
 
@@ -284,6 +376,32 @@ async function fetchIssue(
     status: "open",
     issueType: cfg.defaultType,
   });
+}
+
+/**
+ * Run `bd dep list <id> --json` and return the dependency records. Each
+ * record is a full issue plus a `dependency_type` naming the edge relation
+ * (e.g. "blocks"), attributed to the side that was queried: for direction
+ * "down" the records are what `id` depends on, for "up" they are the issues
+ * that depend on `id`.
+ */
+async function fetchDepRecords(
+  cfg: GlobalArgs,
+  id: string,
+  direction: "down" | "up",
+  ctx: {
+    logger: { error: (msg: string, props?: Record<string, unknown>) => void };
+  },
+): Promise<Record<string, unknown>[]> {
+  const { stdout } = await runBdStrict(
+    `dep list ${direction}`,
+    cfg.bdCommand,
+    ["dep", "list", id, "--json", "--direction", direction],
+    cfg.bdDir,
+    ctx.logger,
+  );
+  const parsed = JSON.parse(stdout) as unknown;
+  return Array.isArray(parsed) ? parsed as Record<string, unknown>[] : [];
 }
 
 interface MethodCtx {
@@ -558,10 +676,348 @@ async function closeIssue(
   return { dataHandles: [handle] };
 }
 
+async function depManage(
+  args: Record<string, unknown>,
+  ctx: MethodCtx,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const parsed = DepArgsSchema.parse(args);
+
+  if (parsed.action === "list") {
+    const { stdout } = await runBdStrict(
+      "dep list",
+      cfg.bdCommand,
+      [
+        "dep",
+        "list",
+        parsed.issueId,
+        "--json",
+        "--direction",
+        parsed.direction,
+      ],
+      cfg.bdDir,
+      ctx.logger,
+    );
+    const records = JSON.parse(stdout) as Record<string, unknown>[];
+    const handles: Array<{ name: string }> = [];
+    const seen = new Set<string>();
+    for (const raw of records) {
+      const id = String(raw.id ?? "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      handles.push(
+        await ctx.writeResource(
+          "issue",
+          `issue-${id}`,
+          normalizeIssue(raw, cfg, {
+            status: "open",
+            issueType: cfg.defaultType,
+          }),
+        ),
+      );
+    }
+    ctx.logger.info(
+      "Listed {count} dependencies ({direction}) of bd issue {id}",
+      {
+        count: handles.length,
+        direction: parsed.direction,
+        id: parsed.issueId,
+      },
+    );
+    return { dataHandles: handles };
+  }
+
+  await runBdStrict(
+    `dep ${parsed.action}`,
+    cfg.bdCommand,
+    [
+      "dep",
+      parsed.action,
+      parsed.issueId,
+      parsed.dependsOnId as string,
+      "--json",
+    ],
+    cfg.bdDir,
+    ctx.logger,
+  );
+  const issue = await fetchIssue(cfg, parsed.issueId, ctx);
+  const dependsOn = await fetchIssue(cfg, parsed.dependsOnId as string, ctx);
+  const handles = [
+    await ctx.writeResource("issue", `issue-${issue.id}`, issue),
+    await ctx.writeResource("issue", `issue-${dependsOn.id}`, dependsOn),
+  ];
+  ctx.logger.info(
+    "{action} dependency: {issueId} on {dependsOnId}",
+    {
+      action: parsed.action,
+      issueId: parsed.issueId,
+      dependsOnId: parsed.dependsOnId,
+    },
+  );
+  return { dataHandles: handles };
+}
+
+async function reopenIssues(
+  args: Record<string, unknown>,
+  ctx: MethodCtx,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const parsed = ReopenArgsSchema.parse(args);
+
+  // bd prints plain text (not JSON) for issues that are already open but
+  // still exits 0, so results are read back via `bd show` rather than parsed.
+  const bdArgs = ["reopen", ...parsed.ids, "--json"];
+  if (parsed.reason) bdArgs.push("--reason", parsed.reason);
+
+  await runBdStrict("reopen", cfg.bdCommand, bdArgs, cfg.bdDir, ctx.logger);
+
+  const handles: Array<{ name: string }> = [];
+  for (const id of parsed.ids) {
+    const issue = await fetchIssue(cfg, id, ctx);
+    handles.push(await ctx.writeResource("issue", `issue-${issue.id}`, issue));
+  }
+
+  ctx.logger.info("Reopened {count} bd issues", { count: handles.length });
+  return { dataHandles: handles };
+}
+
+async function reclaimIssues(
+  args: Record<string, unknown>,
+  ctx: MethodCtx,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const parsed = ReclaimArgsSchema.parse(args);
+
+  const bdArgs = ["reclaim", "--json"];
+  if (parsed.maxAge) bdArgs.push("--older-than", parsed.maxAge);
+  for (const id of parsed.ids ?? []) bdArgs.push("--id", id);
+
+  const { stdout } = await runBdStrict(
+    "reclaim",
+    cfg.bdCommand,
+    bdArgs,
+    cfg.bdDir,
+    ctx.logger,
+  );
+
+  let reclaimed: string[] = [];
+  try {
+    const data = JSON.parse(stdout) as {
+      reclaimed?: Array<{ id?: unknown }>;
+    };
+    reclaimed = (Array.isArray(data?.reclaimed) ? data.reclaimed : [])
+      .map((entry) => String(entry.id ?? ""))
+      .filter((id) => id !== "");
+  } catch {
+    // nothing stale was reclaimable; treat as empty
+  }
+
+  const handles: Array<{ name: string }> = [];
+  for (const id of reclaimed) {
+    try {
+      const issue = await fetchIssue(cfg, id, ctx);
+      handles.push(
+        await ctx.writeResource("issue", `issue-${issue.id}`, issue),
+      );
+    } catch {
+      // the reclaimed issue vanished since reclaim ran; skip it
+    }
+  }
+
+  ctx.logger.info("Reclaimed {count} stale bd leases", {
+    count: reclaimed.length,
+  });
+  return { dataHandles: handles };
+}
+
+async function showGraph(
+  args: Record<string, unknown>,
+  ctx: MethodCtx,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const parsed = GraphArgsSchema.parse(args);
+
+  // `bd graph <id> --json` returns {issues, layout} covering the root's whole
+  // connected component, but its `DependsOn` adjacency only surfaces `blocks`
+  // edges and its node set ignores direction, so typed edges and node
+  // closure are rebuilt from per-node `bd dep list` records. The all-open
+  // shape (`--all --json`) is an array of issues grouped into connected
+  // components, each carrying `Issues` and a full typed `Dependencies` edge
+  // list; when every component provides one it is used directly and no
+  // per-node listing runs.
+  const bdArgs = ["graph", "--json"];
+  if (parsed.rootId) bdArgs.push(parsed.rootId);
+  else bdArgs.push("--all");
+  const { stdout } = await runBdStrict(
+    "graph",
+    cfg.bdCommand,
+    bdArgs,
+    cfg.bdDir,
+    ctx.logger,
+  );
+  const raw = JSON.parse(stdout) as unknown;
+
+  const issues = new Map<string, Record<string, unknown>>();
+  let layers: string[][] | null = null;
+
+  const edgeMap = new Map<string, { from: string; to: string; type: string }>();
+  const addEdge = (from: string, to: string, type: unknown) => {
+    if (!from || !to || from === to) return;
+    const key = `${from}|${to}`;
+    if (!edgeMap.has(key)) {
+      edgeMap.set(key, { from, to, type: String(type ?? "blocks") });
+    }
+  };
+
+  let edgesKnown = false;
+  if (Array.isArray(raw)) {
+    const comps = raw as Array<
+      Record<string, unknown> & {
+        Issues?: Record<string, unknown>[];
+        Dependencies?:
+          | Array<{
+            issue_id?: unknown;
+            depends_on_id?: unknown;
+            type?: unknown;
+          }>
+          | null;
+      }
+    >;
+    edgesKnown = comps.every((comp) => comp?.Dependencies != null);
+    for (const comp of comps) {
+      for (const iss of (comp?.Issues ?? []) as Record<string, unknown>[]) {
+        const id = String(iss.id ?? "");
+        if (id && !issues.has(id)) issues.set(id, iss);
+      }
+      for (const dep of comp?.Dependencies ?? []) {
+        addEdge(
+          String(dep.issue_id ?? ""),
+          String(dep.depends_on_id ?? ""),
+          dep.type,
+        );
+      }
+    }
+  } else {
+    const layout = ((raw as Record<string, unknown>)?.layout ?? {}) as {
+      Layers?: unknown[][];
+      Nodes?: Record<
+        string,
+        { DependsOn?: string[] | null; Issue?: Record<string, unknown> }
+      >;
+    };
+    for (const [id, node] of Object.entries(layout.Nodes ?? {})) {
+      if (id && !issues.has(id)) issues.set(id, node.Issue ?? { id });
+    }
+    if (Array.isArray(layout.Layers)) {
+      layers = layout.Layers.map((
+        l,
+      ) => (Array.isArray(l) ? l.map(String) : []));
+    }
+  }
+
+  // Expand typed edges from every queued node: downstream listings add what
+  // a node depends on, upstream listings add what depends on it; records
+  // seed further nodes so the walk reaches the full closure per direction.
+  // The rooted layout cannot stand in for this (its DependsOn keys only
+  // cover `blocks` relations), so every node is listed unless the all-open
+  // components already carried a complete typed edge list.
+  const queue = [...issues.keys()];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (parsed.direction !== "upstream" && !edgesKnown) {
+      for (const rec of await fetchDepRecords(cfg, id, "down", ctx)) {
+        addEdge(id, String(rec.id ?? ""), rec.dependency_type);
+        const depId = String(rec.id ?? "");
+        if (depId && !issues.has(depId)) {
+          issues.set(depId, rec);
+          queue.push(depId);
+        }
+      }
+    }
+    if (parsed.direction !== "downstream") {
+      for (const rec of await fetchDepRecords(cfg, id, "up", ctx)) {
+        addEdge(String(rec.id ?? ""), id, rec.dependency_type);
+        const fromId = String(rec.id ?? "");
+        if (fromId && !issues.has(fromId)) {
+          issues.set(fromId, rec);
+          queue.push(fromId);
+        }
+      }
+    }
+  }
+
+  // Rooted graphs honor direction and depth: keep only what is reachable
+  // from the root along the requested edge direction (downstream follows
+  // what nodes depend on, upstream what depends on them). The rooted layout
+  // node set necessarily over-shoots the direction, so extras are dropped
+  // here; in all-open mode everything stays.
+  if (parsed.rootId) {
+    const adj = new Map<string, string[]>();
+    for (const e of edgeMap.values()) {
+      const pairs: Array<[string, string]> = [];
+      if (parsed.direction !== "upstream") pairs.push([e.from, e.to]);
+      if (parsed.direction !== "downstream") pairs.push([e.to, e.from]);
+      for (const [a, b] of pairs) {
+        const list = adj.get(a) ?? [];
+        if (!list.includes(b)) list.push(b);
+        adj.set(a, list);
+      }
+    }
+    const keep = new Set<string>([parsed.rootId]);
+    let frontier = [parsed.rootId];
+    for (let hop = 0; parsed.depth < 0 || hop < parsed.depth; hop++) {
+      const next: string[] = [];
+      for (const a of frontier) {
+        for (const b of adj.get(a) ?? []) {
+          if (!keep.has(b)) {
+            keep.add(b);
+            next.push(b);
+          }
+        }
+      }
+      if (next.length === 0) break;
+      frontier = next;
+    }
+    for (const id of [...issues.keys()]) {
+      if (!keep.has(id)) issues.delete(id);
+    }
+    for (const [key, e] of [...edgeMap.entries()]) {
+      if (!keep.has(e.from) || !keep.has(e.to)) edgeMap.delete(key);
+    }
+    if (layers) {
+      layers = layers
+        .map((l) => l.filter((id) => keep.has(id)))
+        .filter((l) => l.length > 0);
+    }
+  }
+
+  const nodes = [...issues.entries()].map(([id, iss]) => ({
+    id,
+    title: String(iss.title ?? ""),
+    status: String(iss.status ?? ""),
+  }));
+  const graph = {
+    rootId: parsed.rootId ?? null,
+    nodes,
+    edges: [...edgeMap.values()],
+    layers,
+  };
+  const handle = await ctx.writeResource(
+    "dependencyGraph",
+    `dep-graph-${parsed.rootId ?? "all"}`,
+    graph,
+  );
+  ctx.logger.info(
+    "Collected bd dependency graph: {nodes} nodes, {edges} edges",
+    { nodes: nodes.length, edges: graph.edges.length },
+  );
+  return { dataHandles: [handle] };
+}
+
 /** Swamp model definition for the beads issue tracker bridge. */
 export const model = {
   type: "@maphew/bd",
-  version: "2026.10.07.1",
+  version: "2026.10.07.2",
   globalArguments: GlobalArgsSchema,
   checks: {
     "bd-usable": {
@@ -606,11 +1062,24 @@ export const model = {
         "Add query method (bd query language filtering); no changes to existing methods or resources",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
+    {
+      toVersion: "2026.10.07.2",
+      description:
+        "Add dep, reopen, reclaim, and graph methods and the dependencyGraph resource; existing methods unchanged",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
   ],
   resources: {
     issue: {
       description: "A BD (beads) issue/task",
       schema: IssueSchema,
+      lifetime: "30d" as const,
+      garbageCollection: 10,
+    },
+    dependencyGraph: {
+      description:
+        "A BD dependency graph: nodes (id, title, status), typed edges (from depends on to), and optional layers",
+      schema: DependencyGraphSchema,
       lifetime: "30d" as const,
       garbageCollection: 10,
     },
@@ -673,6 +1142,42 @@ export const model = {
         args: Record<string, unknown>,
         ctx: Parameters<typeof closeIssue>[1],
       ) => await closeIssue(args, ctx),
+    },
+    reopen: {
+      description:
+        "Reopen one or more closed BD issues, optionally with a reason",
+      arguments: ReopenArgsSchema,
+      execute: async (
+        args: Record<string, unknown>,
+        ctx: Parameters<typeof reopenIssues>[1],
+      ) => await reopenIssues(args, ctx),
+    },
+    dep: {
+      description:
+        "Manage BD dependencies: add, remove, or list them for an issue",
+      arguments: DepArgsSchema,
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Parameters<typeof depManage>[1],
+      ) => depManage(args, ctx),
+    },
+    reclaim: {
+      description:
+        "Revert stale in_progress BD issues (expired lease recovery) back to open",
+      arguments: ReclaimArgsSchema,
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Parameters<typeof reclaimIssues>[1],
+      ) => reclaimIssues(args, ctx),
+    },
+    graph: {
+      description:
+        "Return a BD dependency graph as structured nodes, typed edges, and layers (renderable as Mermaid)",
+      arguments: GraphArgsSchema,
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Parameters<typeof showGraph>[1],
+      ) => showGraph(args, ctx),
     },
   },
 };

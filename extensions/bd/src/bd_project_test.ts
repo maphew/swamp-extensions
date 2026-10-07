@@ -317,3 +317,244 @@ Deno.test("@maphew/bd failure surfaces exit code and stderr", async () => {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("@maphew/bd dep add/list/remove round-trip", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    await runMethod("create", { title: "dependent issue", type: "bug" }, ctx);
+    const aId = [...ctx.written.values()].at(-1)!.id as string;
+    await runMethod("create", { title: "prerequisite issue", type: "task" }, ctx);
+    const bId = [...ctx.written.values()].at(-1)!.id as string;
+
+    ctx.written.clear();
+    const added = await runMethod(
+      "dep",
+      { action: "add", issueId: aId, dependsOnId: bId },
+      ctx,
+    );
+    assertEquals(added.dataHandles?.length, 2);
+    const a = ctx.written.get(`issue-${aId}`)!;
+    assertEquals(a.dependencyCount, 1);
+    const b = ctx.written.get(`issue-${bId}`)!;
+    assertEquals(b.dependentCount, 1);
+
+    ctx.written.clear();
+    await runMethod("dep", { action: "list", issueId: aId }, ctx);
+    const listedDown = [...ctx.written.values()];
+    assertEquals(listedDown.length, 1);
+    assertEquals(listedDown[0].id, bId);
+
+    ctx.written.clear();
+    await runMethod("dep", { action: "list", issueId: bId, direction: "up" }, ctx);
+    const listedUp = [...ctx.written.values()];
+    assertEquals(listedUp.length, 1);
+    assertEquals(listedUp[0].id, aId);
+
+    ctx.written.clear();
+    const removed = await runMethod(
+      "dep",
+      { action: "remove", issueId: aId, dependsOnId: bId },
+      ctx,
+    );
+    assertEquals(removed.dataHandles?.length, 2);
+    const aAfter = ctx.written.get(`issue-${aId}`)!;
+    assertEquals(aAfter.dependencyCount, 0);
+
+    ctx.written.clear();
+    await runMethod("dep", { action: "list", issueId: aId }, ctx);
+    assertEquals([...ctx.written.values()].length, 0);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd dep rejects cycles and requires dependsOnId", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    await runMethod("create", { title: "cycle a", type: "task" }, ctx);
+    const aId = [...ctx.written.values()].at(-1)!.id as string;
+    await runMethod("create", { title: "cycle b", type: "task" }, ctx);
+    const bId = [...ctx.written.values()].at(-1)!.id as string;
+
+    assertThrows(
+      () =>
+        model.methods.dep.arguments.parse({ action: "add", issueId: aId }),
+      "dependsOnId",
+    );
+
+    await runMethod("dep", { action: "add", issueId: aId, dependsOnId: bId }, ctx);
+    let caught: unknown;
+    try {
+      await runMethod(
+        "dep",
+        { action: "add", issueId: bId, dependsOnId: aId },
+        ctx,
+      );
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught instanceof Error);
+    assertStringIncludes(caught.message, "bd dep add failed (exit");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd reopens closed issues with a reason", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    await runMethod("create", { title: "reopen one", type: "bug" }, ctx);
+    const aId = [...ctx.written.values()].at(-1)!.id as string;
+    await runMethod("create", { title: "reopen two", type: "task" }, ctx);
+    const bId = [...ctx.written.values()].at(-1)!.id as string;
+    await runMethod("close", { id: aId }, ctx);
+    await runMethod("close", { id: bId }, ctx);
+
+    ctx.written.clear();
+    const reopened = await runMethod(
+      "reopen",
+      { ids: [aId, bId], reason: "regression reappeared" },
+      ctx,
+    );
+    assertEquals(reopened.dataHandles?.length, 2);
+    for (const issue of [...ctx.written.values()]) {
+      assertEquals(issue.status, "open");
+    }
+
+    // reopening an already-open issue is a no-op, not an error
+    await runMethod("reopen", { ids: [aId] }, ctx);
+    ctx.written.clear();
+    await runMethod("show", { id: aId }, ctx);
+    assertEquals([...ctx.written.values()][0].status, "open");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd reclaim with no stale leases is a no-op", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    await runMethod("create", { title: "not stale", type: "task" }, ctx);
+    const id = [...ctx.written.values()].at(-1)!.id as string;
+
+    const reclaimed = await runMethod("reclaim", { maxAge: "0s" }, ctx);
+    assertEquals(reclaimed.dataHandles?.length, 0);
+
+    ctx.written.clear();
+    await runMethod("reclaim", { ids: [id] }, ctx);
+    assertEquals([...ctx.written.values()].length, 0);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd graph returns nodes, typed edges, and layers", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    await runMethod("create", { title: "graph base", type: "task" }, ctx);
+    const aId = [...ctx.written.values()].at(-1)!.id as string;
+    await runMethod("create", { title: "graph middle", type: "task" }, ctx);
+    const bId = [...ctx.written.values()].at(-1)!.id as string;
+    await runMethod("create", { title: "graph tip", type: "task" }, ctx);
+    const cId = [...ctx.written.values()].at(-1)!.id as string;
+    // c depends on b, b depends on a
+    await runMethod("dep", { action: "add", issueId: bId, dependsOnId: aId }, ctx);
+    await runMethod("dep", { action: "add", issueId: cId, dependsOnId: bId }, ctx);
+
+    ctx.written.clear();
+    await runMethod("graph", { rootId: cId }, ctx);
+    const graph = ctx.written.get(`dep-graph-${cId}`)!;
+    assertEquals(graph.rootId, cId);
+    const nodes = graph.nodes as Array<Record<string, unknown>>;
+    assertEquals(nodes.length, 3);
+    assert(nodes.some((n) => n.id === aId && n.title === "graph base"));
+    const edges = graph.edges as Array<Record<string, unknown>>;
+    assertEquals(edges.length, 2);
+    assert(
+      edges.some((e) => e.from === cId && e.to === bId && e.type === "blocks"),
+    );
+    assert(
+      edges.some((e) => e.from === bId && e.to === aId && e.type === "blocks"),
+    );
+    const layers = graph.layers as string[][];
+    assertEquals(layers.length, 3);
+    assertEquals(layers[0], [aId]);
+    assertEquals(layers[1], [bId]);
+    assertEquals(layers[2], [cId]);
+
+    // depth 1 keeps only the tip and its direct prerequisite
+    ctx.written.clear();
+    await runMethod("graph", { rootId: cId, depth: 1 }, ctx);
+    const shallow = ctx.written.get(`dep-graph-${cId}`)!;
+    assertEquals((shallow.nodes as unknown[]).length, 2);
+    assertEquals((shallow.edges as unknown[]).length, 1);
+    const shallowLayers = shallow.layers as string[][];
+    assertEquals(shallowLayers.length, 2);
+    assertEquals(shallowLayers[0], [bId]);
+    assertEquals(shallowLayers[1], [cId]);
+
+    // upstream gathers dependents of the root as well
+    ctx.written.clear();
+    await runMethod("graph", { rootId: aId, direction: "upstream" }, ctx);
+    const up = ctx.written.get(`dep-graph-${aId}`)!;
+    assertEquals((up.nodes as unknown[]).length, 3);
+    assertEquals((up.edges as unknown[]).length, 2);
+
+    // non-blocks edges (tracks) must not be dropped; create one outside the
+    // model, the way a CLI user would. A rooted graph then honors direction:
+    // from the tracker only its dependency chain shows, not the tip
+    await runMethod("create", { title: "graph tracker", type: "task" }, ctx);
+    const dId = [...ctx.written.values()].at(-1)!.id as string;
+    const tracksProc = new Deno.Command("bd", {
+      args: ["dep", "add", dId, bId, "-t", "tracks"],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const tracksOut = await tracksProc.output();
+    assert(tracksOut.success);
+    ctx.written.clear();
+
+    await runMethod("graph", { rootId: dId }, ctx);
+    const downFromD = ctx.written.get(`dep-graph-${dId}`)!;
+    const nodeIds = (downFromD.nodes as Array<Record<string, unknown>>).map(
+      (n) => n.id,
+    );
+    assertEquals(nodeIds.length, 3);
+    assert(nodeIds.includes(dId) && nodeIds.includes(bId) && nodeIds.includes(aId));
+    assert(!nodeIds.includes(cId));
+    const downEdges = downFromD.edges as Array<Record<string, unknown>>;
+    assertEquals(downEdges.length, 2);
+    assert(
+      downEdges.some((e) => e.from === dId && e.to === bId && e.type === "tracks"),
+    );
+    assert(
+      downEdges.some((e) => e.from === bId && e.to === aId && e.type === "blocks"),
+    );
+
+    // all-open mode has no root and no layers and carries every typed edge
+    ctx.written.clear();
+    await runMethod("graph", {}, ctx);
+    const all = ctx.written.get("dep-graph-all")!;
+    assertEquals(all.rootId, null);
+    assertEquals(all.layers, null);
+    assert((all.nodes as unknown[]).length >= 4);
+    const allEdges = all.edges as Array<Record<string, unknown>>;
+    assertEquals(allEdges.length, 3);
+    assert(allEdges.some((e) => e.type === "tracks"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd graph upstream requires a rootId", () => {
+  assertThrows(
+    () => model.methods.graph.arguments.parse({ direction: "upstream" }),
+    "requires rootId",
+  );
+});

@@ -30,6 +30,10 @@ swamp model create @maphew/bd my-tracker
 | `create` | Create an issue (title, type, priority, labels, parent, ...)   |
 | `update` | Edit fields, relabel, or atomically claim (`claim: true`)      |
 | `close`  | Close an issue, optionally with a reason; preserves its fields |
+| `reopen` | Reopen one or more closed issues, optionally with a reason     |
+| `dep`    | Manage dependencies: `add`/`remove`/`list` for an issue        |
+| `reclaim`| Revert stale in_progress issues to open (dead-worker recovery) |
+| `graph`  | Dependency graph as structured nodes, typed edges, and layers  |
 
 ```bash
 # What can I work on right now?
@@ -50,10 +54,39 @@ swamp model method run @maphew/bd query my-tracker \
 # Include closed issues (bd excludes them by default)
 swamp model method run @maphew/bd query my-tracker \
   --input '{"q":"priority<=1","includeClosed":true,"sort":"updated"}'
+
+# Reopen a closed issue from a CI failure handler
+swamp model method run @maphew/bd reopen my-tracker \
+  --input '{"ids":["bd-123"],"reason":"regression reappeared"}'
+
+# Link issues: bd-123 now depends on bd-124 (cycle-safe)
+swamp model method run @maphew/bd dep my-tracker \
+  --input '{"action":"add","issueId":"bd-123","dependsOnId":"bd-124"}'
+
+# List what depends on bd-124 (upstream) as issue resources
+swamp model method run @maphew/bd dep my-tracker \
+  --input '{"action":"list","issueId":"bd-124","direction":"up"}'
+
+# Nightly reaper: revert leases stale for over an hour
+swamp model method run @maphew/bd reclaim my-tracker \
+  --input '{"maxAge":"1h"}'
+
+# Dependency graph for Mermaid rendering; upstream requires a rootId
+swamp model method run @maphew/bd graph my-tracker \
+  --input '{"rootId":"bd-123","direction":"both","depth":3}'
 ```
 
 Every method writes normalized issue resources (`spec: issue`), so results are
 queryable with `swamp data query` and referenceable from CEL expressions.
+`graph` instead writes a single `dependencyGraph` resource: `nodes` (id, title,
+status), `edges` (`from`, `to`, `type`, meaning from depends on to), and
+`layers` in execution order from bd's own layout (null in all-open mode, where
+no root anchors the layering).
+
+`reclaim` maps to `bd reclaim --json`: `maxAge` is the grace window past lease
+expiry (bd's default is 10m) and `ids` narrows to specific issues. Issues that
+were actually reverted come back as issue resources with fresh fields, so a
+nightly workflow can reclaim stale work and reassign it to the ready pool.
 
 `list`, `query`, and `ready` take a `limit` (default 50, max 500) and set `truncated:
 true` on every returned issue when more matched than the limit allowed. The
