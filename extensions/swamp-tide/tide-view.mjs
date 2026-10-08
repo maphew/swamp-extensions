@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const DATASTORE = join(process.cwd(), ".swamp", "datastore", "data");
+const DATASTORE = join(process.cwd(), ".swamp", "data");
 const MODEL = "@maphew/swamp-tide";
 const RESOURCE = "report-current";
 

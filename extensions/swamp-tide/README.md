@@ -63,8 +63,28 @@ report as a self-contained HTML page (inline SVG charts
 included) and opens it in your browser:
 
 ```bash
+node ~/.swamp/pulled-extensions/@maphew/swamp-tide/files/tide-view.mjs
+```
+
+For convenience, you can create an alias:
+
+```bash
+alias tide-view='node ~/.swamp/pulled-extensions/@maphew/swamp-tide/files/tide-view.mjs'
+```
+
+Or add the extension's files directory to your PATH:
+```bash
+export PATH="$PATH:$HOME/.swamp/pulled-extensions/@maphew/swamp-tide/files"
+```
+
+## Preview
+
+Once you have generated tide data by running the swamp-tide workflow, you can preview the output by running:
+```bash
 tide-view
 ```
+
+This will generate a self-contained HTML file and open it in your default browser, showing the latest tide report with SVG charts.
 
 The page follows the system light/dark setting by default. The
 toggle in the corner cycles system -> light -> dark and
