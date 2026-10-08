@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/swamp-tide"
-version: 2026.10.08.3
+version: 2026.10.08.4
 description: >-
   Troll the swamp club activity logs to find when people (and their agents) are participating. Collects the club feed into a normalized event stream, then buckets it into a 7x24 participation heatmap with peak-slot detection, hour-of-day / weekday / day-of-month / daily trajectory charts, and a markdown tide report. Scheduled hourly by the companion swamp-tide workflow. Ships tide-view, a viewer that renders the latest report as a themed HTML page.
 repository: "https://github.com/maphew/swamp-extensions.git"

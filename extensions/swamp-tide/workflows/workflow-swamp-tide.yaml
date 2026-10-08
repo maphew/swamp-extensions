@@ -1,0 +1,31 @@
+id: 34ad4127-4fb0-46ce-a1e4-4f81453dde0e
+name: @maphew/swamp-tide
+tags: {}
+jobs:
+  - name: main
+    description: Main job
+    steps:
+      - name: collect
+        description: Collect events from swamp club feed
+        task:
+          type: model_method
+          modelIdOrName: tide
+          methodName: collect
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: heatmap
+        description: Build heatmap and generate report
+        task:
+          type: model_method
+          modelIdOrName: tide
+          methodName: heatmap
+          inputs:
+            events: '${{data.latest("tide", "events-current").attributes.events}}'
+        dependsOn:
+          - step: collect
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+version: 1
