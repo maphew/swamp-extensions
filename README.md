@@ -24,6 +24,7 @@ swamp extension push extensions/<package>/manifest.yaml
 | `agent-task`   | `@maphew/agent-task`        | Headless agent dispatch: queue filter, branch+run, and fan-out sweep |
 | `handoff`      | `@maphew/handoff`           | Exact-state handoffs: Git + Bead snapshot, narrative, resume brief |
 | `housekeeping` | `@maphew/housekeeping`      | Generic housekeeping sweep: git, worktrees, temp/processes/disk, tracker hygiene |
+| `retro`        | `@maphew/retro`             | Mine Claude Code, Codex, and Amp sessions into an evidence-backed findings register |
 
 ## Layout
 
