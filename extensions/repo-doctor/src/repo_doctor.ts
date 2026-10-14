@@ -113,20 +113,36 @@ const SKIP_DIRS = new Set([
 ]);
 
 async function* walk(dir: string): AsyncGenerator<string> {
-  let entries: AsyncIterable<Deno.DirEntry>;
   try {
-    entries = Deno.readDir(dir);
+    for await (const entry of Deno.readDir(dir)) {
+      if (entry.isDirectory) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        yield* walk(`${dir}/${entry.name}`);
+      } else if (entry.isFile) {
+        yield `${dir}/${entry.name}`;
+      }
+    }
   } catch {
+    // Missing or unreadable directory: yield nothing rather than throw. The
+    // read error surfaces from iterating `Deno.readDir`, not from creating it.
     return;
   }
-  for await (const entry of entries) {
-    if (entry.isDirectory) {
-      if (SKIP_DIRS.has(entry.name)) continue;
-      yield* walk(`${dir}/${entry.name}`);
-    } else if (entry.isFile) {
-      yield `${dir}/${entry.name}`;
-    }
-  }
+}
+
+/**
+ * Read a flat YAML list block (`additionalFiles:`, `binaries:`) from a pulled
+ * extension manifest. Only scalar list items count; nested mappings are
+ * ignored. Used to verify every declared file actually landed on disk.
+ */
+export function parseManifestList(manifest: string, key: string): string[] {
+  const re = new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s+\\S+.*\\n?)*)`, "m");
+  const block = re.exec(manifest)?.[1];
+  if (!block) return [];
+  return block
+    .split("\n")
+    .map((line) => /^\s+-\s+(\S+)/.exec(line)?.[1])
+    .filter((v): v is string => v !== undefined)
+    .map((v) => v.replace(/^["']|["']$/g, ""));
 }
 
 /**
@@ -237,11 +253,11 @@ async function checkExtensions(
     const extDir = abs.slice(0, abs.length - "/manifest.yaml".length);
 
     const missingFiles: string[] = [];
-    for await (const file of walk(`${extDir}/files`)) {
-      // Every file the manifest declares must actually be on disk.
-      const rel = relative(`${extDir}/files`, file);
-      void rel;
-      if (!(await exists(file))) missingFiles.push(relative(extDir, file));
+    // Every file the manifest declares must actually be on disk under files/.
+    for (const declared of parseManifestList(manifest, "additionalFiles")) {
+      if (!(await exists(`${extDir}/files/${declared}`))) {
+        missingFiles.push(declared);
+      }
     }
     // The concrete failure mode: extension dir exists but has no files/ tree.
     let hasFiles = true;
@@ -438,13 +454,19 @@ async function scan(
 
 export const model = {
   type: "@maphew/repo-doctor",
-  version: "2026.10.14.1",
+  version: "2026.10.14.2",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
       toVersion: "2026.10.14.1",
       description:
         "Source moved to maphew/swamp-extensions (AGPL-3.0); no schema, method, or resource changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.14.2",
+      description:
+        "Fix checkExtensions crashing on a pulled extension with no files/ tree, and verify declared additionalFiles instead of a dead no-op loop",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

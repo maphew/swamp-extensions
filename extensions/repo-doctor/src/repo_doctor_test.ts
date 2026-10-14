@@ -8,6 +8,7 @@ import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
   isCovered,
   offendingLines,
+  parseManifestList,
   relative,
   renderReport,
 } from "./repo_doctor.ts";
@@ -55,6 +56,33 @@ Deno.test("isCovered matches exact, directory-prefix, and parent rules", () => {
 Deno.test("isCovered ignores comments and negations", () => {
   assertEquals(isCovered(".swamp/data/", ["# .swamp/data/"]), false);
   assertEquals(isCovered(".swamp/data/", ["!.swamp/data/"]), false);
+});
+
+Deno.test("parseManifestList reads a flat additionalFiles block", () => {
+  const manifest = [
+    "name: '@maphew/example'",
+    "version: 2026.10.14.1",
+    "models:",
+    "  - src/model.ts",
+    "additionalFiles:",
+    "  - README.md",
+    "  - LICENSE",
+    "platforms:",
+    "  - linux-x86_64",
+  ].join("\n");
+  assertEquals(parseManifestList(manifest, "additionalFiles"), [
+    "README.md",
+    "LICENSE",
+  ]);
+});
+
+Deno.test("parseManifestList returns empty when the key is absent", () => {
+  assertEquals(parseManifestList("name: x\nversion: 1\n", "additionalFiles"), []);
+});
+
+Deno.test("parseManifestList strips quotes", () => {
+  const manifest = "binaries:\n  - 'tide-view.mjs'\n";
+  assertEquals(parseManifestList(manifest, "binaries"), ["tide-view.mjs"]);
 });
 
 Deno.test("renderReport says healthy when there are no findings", () => {
