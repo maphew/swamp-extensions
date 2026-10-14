@@ -11,10 +11,12 @@ swamp extension push extensions/<package>/manifest.yaml
 
 ## Packages
 
-| Package                     | Model type                    | Purpose                                             |
-| --------------------------- | ----------------------------- | --------------------------------------------------- |
-| `bd`                        | `@maphew/bd`                  | Beads (`bd`) issue tracker bridge for swamp workflows |
-| `kilo-code-project`         | `@maphew/kilo-code-project`   | Kilo Code project config/inventory inventory        |
+| Package        | Model type                  | Purpose                                                        |
+| -------------- | --------------------------- | -------------------------------------------------------------- |
+| `bd`           | `@maphew/bd`                | Beads (`bd`) issue tracker bridge for swamp workflows           |
+| `swamp-tide`   | `@maphew/swamp-tide`        | Swamp Club activity heatmap, charts, and report                 |
+| `repo-doctor`  | `@maphew/repo-doctor`       | Repo hygiene: hardcoded home paths, extension integrity, gitignore |
+| `agent-config` | `@maphew/agent-config`      | Enrolled AI-tool config inventory and drift check               |
 
 ## Layout
 

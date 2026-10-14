@@ -1,0 +1,32 @@
+manifestVersion: 1
+name: "@maphew/agent-config"
+version: 2026.10.14.1
+description: >-
+  Inventories enrolled AI-tool configs in a swamp repo and reports drift between
+  the enrollment manifest (.swamp.yaml tools:), the custom-tool definitions
+  (.swamp-custom-tools.yaml), and on-disk state. Distinguishes a tool that is
+  merely un-customised from one that is genuinely missing or orphaned.
+repository: "https://github.com/maphew/swamp-extensions.git"
+paths:
+  base: manifest
+models:
+  - src/agent_config.ts
+workflows: []
+vaults: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+  - darwin-x86_64
+  - darwin-aarch64
+labels:
+  - agents
+  - config
+  - drift
+  - inventory
+  - tooling
+dependencies: []
