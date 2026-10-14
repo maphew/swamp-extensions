@@ -20,6 +20,7 @@ swamp extension push extensions/<package>/manifest.yaml
 | `kilo-code-project` | `@maphew/kilo-code-project` | Kilo Code CLI config/inventory discovery                 |
 | `club-pulse`   | `@maphew/club-pulse`        | Swamp Club points velocity: samples, buckets, and dashboard     |
 | `pr-sweep-config` | `@maphew/pr-sweep-config` | PR sweep repository-pair configuration store                  |
+| `pr-sweep`     | `@maphew/pr-sweep`          | Sweep fork PRs: review, update, and merge, with per-PR results  |
 
 ## Layout
 
