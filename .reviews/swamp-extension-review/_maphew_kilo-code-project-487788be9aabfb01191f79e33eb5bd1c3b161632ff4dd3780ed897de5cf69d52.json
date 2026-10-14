@@ -1,0 +1,28 @@
+{
+  "extension": "@maphew/kilo-code-project",
+  "version": "2026.10.14.1",
+  "reviewedAt": "2026-10-14T23:10:00Z",
+  "dimensions": [
+    { "id": "credentials-secrets", "verdict": "pass", "note": "Handles no credentials and reads no auth tokens. Discovered config objects are passed through redact() with redactSecrets defaulting true, replacing secret-looking keys with [redacted]. Redaction is key-based and documented as best-effort." },
+    { "id": "logging-quality", "verdict": "pass", "note": "discover() logs structured entry ('Discovering Kilo Code config from {dir}') and completion with counts. No string interpolation and no secret values logged." },
+    { "id": "error-handling", "verdict": "pass", "note": "Discovery is best-effort: safeStat/exists swallow stat errors, readLimited closes the handle in finally, and unreadable config is recorded as a warning rather than thrown. realPathOrResolve falls back to a resolved path when realPath fails." },
+    { "id": "testing-completeness", "verdict": "pass", "note": "kilo_project_test.ts covers stripJsonComments (line/block comments, // inside strings, escaped quotes) and redact (recursive secret keys, arrays, primitives, case-insensitivity). Filesystem-walking discovery is not unit-tested." },
+    { "id": "idempotency-resilience", "verdict": "pass", "note": "Read-only discovery; reruns are idempotent and write the same three outputs. No external mutations and nothing to clean up." },
+    { "id": "api-contracts", "verdict": "na", "note": "No external HTTP or network calls; local filesystem inspection only." },
+    { "id": "resource-management", "verdict": "pass", "note": "readLimited closes the Deno file handle in a finally block; walkers use Deno.readDir iteration which self-closes. No temp files or connections." },
+    { "id": "published-surface-hygiene", "verdict": "pass", "note": "README uses generic paths (.kilo, .swamp) and no real hostnames, IPs, or account identifiers. Tests use synthetic config objects." },
+    { "id": "schema-strictness", "verdict": "pass", "note": "All schemas are plain z.object(...) with no .passthrough(); CEL validation works." },
+    { "id": "lifetime-gc", "verdict": "pass", "note": "inventory and health resources plus the summary file set lifetime 30d and garbageCollection 10, appropriate for an occasional inventory snapshot." },
+    { "id": "crud-completeness", "verdict": "na", "note": "Not a CRUD lifecycle model — it is a read-only inventory/discovery model." },
+    { "id": "preflight-checks", "verdict": "na", "note": "No mutating methods, so no pre-flight gate is required." },
+    { "id": "instance-names", "verdict": "pass", "note": "discover()/summarise() write inventory-current, health-current, and summary-current — unique per spec and identical shape for both methods." },
+    { "id": "data-access", "verdict": "na", "note": "Stateless discovery; reads no stored resources and uses no dataRepository access." },
+    { "id": "version-upgrades", "verdict": "pass", "note": "Bumped to 2026.10.14.1 with a no-op upgrades entry (source moved to swamp-extensions; no schema changes) so existing instances advance their typeVersion from the 2026.09.29.2 published baseline." }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — discover() builds the inventory/health objects in one place and writes them with the summary file; the schemas match the assembled objects. best-effort discovery populates all declared fields with empty collections where nothing was found.",
+    "truncation-honesty": "pass — file reads are capped by maxFileBytes and oversized/truncated files are surfaced through health warnings rather than silently dropped.",
+    "instance-name-consistency": "pass — each spec has exactly one writer instance name (inventory-current, health-current) plus the summary file summary-current.",
+    "schema-field-coverage": "pass — every declared field has a producing code path; optional frontmatter is only present when parsed."
+  }
+}

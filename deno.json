@@ -1,7 +1,7 @@
 {
   "tasks": {
-    "check": "deno check extensions/bd/src/ extensions/swamp-tide/src/ extensions/repo-doctor/src/ extensions/agent-config/src/",
-    "test": "deno test --allow-read --allow-write --allow-run --allow-env --allow-net extensions/bd/src/ extensions/swamp-tide/src/ extensions/repo-doctor/src/ extensions/agent-config/src/"
+    "check": "deno check extensions/bd/src/ extensions/swamp-tide/src/ extensions/repo-doctor/src/ extensions/agent-config/src/ extensions/kilo-code-project/src/ extensions/club-pulse/src/",
+    "test": "deno test --allow-read --allow-write --allow-run --allow-env --allow-net extensions/bd/src/ extensions/swamp-tide/src/ extensions/repo-doctor/src/ extensions/agent-config/src/ extensions/kilo-code-project/src/ extensions/club-pulse/src/"
   },
   "lint": {
     "rules": {

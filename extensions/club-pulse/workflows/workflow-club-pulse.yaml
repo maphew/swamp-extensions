@@ -1,0 +1,42 @@
+id: a0ce58fc-b119-4f40-8e8f-ea13a70b054b
+name: @maphew/club-pulse
+description: >-
+  Sample the operator's Swamp Club points on a fixed cadence and refresh the
+  minute / hour / day pulse report. Sampling cadence bounds bucket resolution —
+  at 5-minute sampling the minute table shows 5-minute steps.
+version: 1
+inputs:
+  properties:
+    pulseModel:
+      type: string
+      description: Club pulse model name
+      default: club-pulse
+  required: [pulseModel]
+trigger:
+  schedule: "*/5 * * * *"
+  inputs:
+    pulseModel: club-pulse
+jobs:
+  - name: pulse
+    description: Append a club-points sample and rebuild the bucketed pulse report
+    steps:
+      - name: sample
+        description: Fetch and append the current club-points snapshot
+        task:
+          type: model_method
+          modelType: "@maphew/club-pulse"
+          modelName: ${{ inputs.pulseModel }}
+          methodName: sample
+          inputs: {}
+      - name: refresh
+        description: Bucket recorded samples into minute / hour / day deltas
+        dependsOn:
+          - step: sample
+            condition:
+              type: succeeded
+        task:
+          type: model_method
+          modelType: "@maphew/club-pulse"
+          modelName: ${{ inputs.pulseModel }}
+          methodName: pulse
+          inputs: {}
