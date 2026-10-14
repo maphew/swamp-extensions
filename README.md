@@ -19,6 +19,7 @@ swamp extension push extensions/<package>/manifest.yaml
 | `agent-config` | `@maphew/agent-config`      | Enrolled AI-tool config inventory and drift check               |
 | `kilo-code-project` | `@maphew/kilo-code-project` | Kilo Code CLI config/inventory discovery                 |
 | `club-pulse`   | `@maphew/club-pulse`        | Swamp Club points velocity: samples, buckets, and dashboard     |
+| `pr-sweep-config` | `@maphew/pr-sweep-config` | PR sweep repository-pair configuration store                  |
 
 ## Layout
 
