@@ -524,8 +524,16 @@ type ModelContext = {
 
 export const model = {
   type: "@maphew/club-pulse",
-  version: "2026.10.14.1",
+  version: "2026.10.14.2",
   globalArguments: GlobalArgsSchema,
+  upgrades: [
+    {
+      toVersion: "2026.10.14.2",
+      description:
+        "Bundled workflow references the managed club-pulse instance (modelIdOrName) so the required username global arg is read from the instance; no model schema changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
   resources: {
     samples: {
       description: "Rolling buffer of timestamped club-points samples",

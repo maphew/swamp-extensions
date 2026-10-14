@@ -1,7 +1,7 @@
 {
   "extension": "@maphew/club-pulse",
-  "version": "2026.10.14.1",
-  "reviewedAt": "2026-10-14T23:10:00Z",
+  "version": "2026.10.14.2",
+  "reviewedAt": "2026-10-14T23:12:00Z",
   "dimensions": [
     { "id": "credentials-secrets", "verdict": "pass", "note": "No credentials. The only external value is the public Swamp Club URL; the tracked username is not a secret. No vault refs needed." },
     { "id": "logging-quality", "verdict": "pass", "note": "Structured placeholders on both methods ('Sampled {user}: {score} lifetime, {today} today' and 'Pulse: {n} sample(s), {gained} net points over window'). No interpolation and no sensitive data." },
@@ -11,13 +11,13 @@
     { "id": "api-contracts", "verdict": "pass", "note": "GET {clubUrl}/api/v1/leaderboard/locate?q=<username> returns a boards map; the model tolerates missing boards/rows (nulls/zeros) and only hard-fails when the alltime row is absent. Same endpoint as the prior-art swamp-club-score extension." },
     { "id": "resource-management", "verdict": "pass", "note": "The fetch carries a timeout so a hung request cannot leak. No temp files in the model; the bundled pulse-view.sh writes its own temp HTML and opens/prints it." },
     { "id": "published-surface-hygiene", "verdict": "pass", "note": "README uses a 'your-name' placeholder for username and the public swamp-club.com URL. Test fixtures use maphew and a tier name, no real hostnames, IPs, or account identifiers." },
-    { "id": "schema-strictness", "verdict": "pass", "note": "All schemas are plain z.object(...) with no .passthrough(); CEL validation works. username is now required (no personal default)." },
+    { "id": "schema-strictness", "verdict": "pass", "note": "All schemas are plain z.object(...) with no .passthrough(); CEL validation works. username is required (no personal default), and the bundled workflow supplies it from the managed instance via modelIdOrName rather than hardcoding it." },
     { "id": "lifetime-gc", "verdict": "pass", "note": "samples is infinite/5 (time-series history), pulse infinite/10, and the report/dashboard files infinite/10. maxSamples caps the buffer and the dropped counter records evictions." },
     { "id": "crud-completeness", "verdict": "na", "note": "Not a CRUD lifecycle model — an append-only sampler plus a derived report." },
     { "id": "preflight-checks", "verdict": "na", "note": "sample writes only local data; there is no external mutation to gate." },
     { "id": "instance-names", "verdict": "pass", "note": "sample writes samples-current; pulse writes pulse-current, pulse-report-current, and pulse-dashboard. Unique per spec with no cross-method collisions." },
     { "id": "data-access", "verdict": "pass", "note": "sample and pulse read the prior buffer via ctx.readResource('samples-current') with a defensive optional fallback, rather than reaching into the data repository." },
-    { "id": "version-upgrades", "verdict": "pass", "note": "First publish (2026.10.14.1); no prior published instances to migrate, so no upgrades chain is required. The workflow is namespaced @maphew/club-pulse per registry collective rules." }
+    { "id": "version-upgrades", "verdict": "pass", "note": "2026.10.14.2 adds a no-op upgrades entry over the 2026.10.14.1 first publish so instances advance their typeVersion; the only change is the bundled workflow switching to modelIdOrName." }
   ],
   "mechanical": {
     "schema-write-conformance": "pass — SamplesSchema (username, samples, updatedAt, dropped) and PulseSchema are assembled in one place and written; Sample entries always carry all declared fields from LocateRow with null/0 fallbacks.",
