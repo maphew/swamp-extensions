@@ -1,0 +1,16 @@
+id: 7b6f6d2e-2e2c-4d2a-9d0f-0e6f6b1a4c31
+name: @maphew/housekeeping
+description: >-
+  Run the read-only housekeeping sweep and refresh the markdown report.
+  Requires a model instance named `housekeeping` created from @maphew/housekeeping.
+version: 1
+jobs:
+  - name: sweep
+    description: Run every read-only check and write the audit + report
+    steps:
+      - name: check
+        description: Audit git, worktrees, temp/processes/disk, and tracker hygiene
+        task:
+          type: model_method
+          modelIdOrName: housekeeping
+          methodName: check

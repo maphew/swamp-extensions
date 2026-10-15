@@ -23,6 +23,7 @@ swamp extension push extensions/<package>/manifest.yaml
 | `pr-sweep`     | `@maphew/pr-sweep`          | Sweep fork PRs: review, update, and merge, with per-PR results  |
 | `agent-task`   | `@maphew/agent-task`        | Headless agent dispatch: queue filter, branch+run, and fan-out sweep |
 | `handoff`      | `@maphew/handoff`           | Exact-state handoffs: Git + Bead snapshot, narrative, resume brief |
+| `housekeeping` | `@maphew/housekeeping`      | Generic housekeeping sweep: git, worktrees, temp/processes/disk, tracker hygiene |
 
 ## Layout
 

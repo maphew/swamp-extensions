@@ -1,0 +1,37 @@
+manifestVersion: 1
+name: "@maphew/housekeeping"
+version: 2026.10.15.1
+description: >-
+  Generic, portable housekeeping sweep for any checkout. A read-only audit of
+  dirty trees, diverged or deleted branches, forgotten stashes, stale worktrees,
+  temp debris, leftover processes, disk pressure, and stuck tracker claims, plus
+  explicitly-gated cleanup methods that dry-run by default. Project-agnostic:
+  projectDir defaults to `.`, with .beads/ and .swamp/ awareness layered on when
+  present.
+repository: "https://github.com/maphew/swamp-extensions.git"
+license: MIT
+paths:
+  base: manifest
+models:
+  - src/housekeeping.ts
+workflows:
+  - workflows/workflow-housekeeping.yaml
+vaults: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+  - darwin-x86_64
+  - darwin-aarch64
+labels:
+  - housekeeping
+  - hygiene
+  - git
+  - worktree
+  - beads
+  - maintenance
+dependencies: []
