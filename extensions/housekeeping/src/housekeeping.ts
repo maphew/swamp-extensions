@@ -198,6 +198,8 @@ type ModelContext = {
   };
 };
 
+type Logger = ModelContext["logger"];
+
 type CmdResult = { stdout: string; stderr: string; code: number };
 
 // ---------- pure helpers ----------------------------------------------------
@@ -495,7 +497,7 @@ async function detectDefaultBranch(
     dir,
   );
   if (head) return head.trim().replace(/^origin\//, "");
-  for (const candidate of ["main", "master"]) {
+  for (const candidate of ["main", "master", "trunk", "develop"]) {
     const ok = await run(
       ["git", "show-ref", "--verify", "--quiet", `refs/heads/${candidate}`],
       dir,
@@ -547,6 +549,16 @@ async function checkGit(
     ["git", "branch", "--merged", defaultBranch, "--format=%(refname:short)"],
     dir,
   );
+  if (mergedRaw === null) {
+    findings.push({
+      category: "git",
+      severity: "info",
+      message: `Could not list branches merged into '${defaultBranch}'`,
+      detail:
+        "The mainline name may differ. Set the defaultBranch global arg to the real mainline to enable merged-branch detection.",
+      target: defaultBranch,
+    });
+  }
   const merged = (mergedRaw ?? "")
     .split("\n")
     .map((s) => s.trim())
@@ -814,6 +826,7 @@ async function checkBeads(
   dir: string,
   nowMs: number,
   cfg: GlobalArgs,
+  logger: Logger,
 ): Promise<{ report: BeadsReport; findings: Finding[] }> {
   const findings: Finding[] = [];
   const present = await pathExists(`${dir}/.beads`);
@@ -832,6 +845,17 @@ async function checkBeads(
 
   const bdBin = cfg.bdBin;
   const versionOut = await stdout([bdBin, "--version"], dir);
+  if (versionOut === null) {
+    findings.push({
+      category: "beads",
+      severity: "warning",
+      message: `.beads/ is present but \`${bdBin} --version\` did not run`,
+      detail:
+        "The tracker binary is missing or not executable; every tracker check is skipped.",
+      target: bdBin,
+    });
+    return { report, findings };
+  }
   report.bdVersion = versionToken(versionOut);
   try {
     report.expectedVersion = versionToken(
@@ -884,8 +908,10 @@ async function checkBeads(
         report.claims.push(claim);
         if (stale) report.staleClaims.push(claim);
       }
-    } catch {
-      // Unparseable bd JSON: skip rather than fail the whole sweep.
+    } catch (error) {
+      logger.warn("Could not parse `bd list --status=in_progress --json`", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   for (const claim of report.staleClaims) {
@@ -904,7 +930,10 @@ async function checkBeads(
     try {
       const parsed = JSON.parse(staleOut);
       report.staleIssues = Array.isArray(parsed) ? parsed.length : 0;
-    } catch {
+    } catch (error) {
+      logger.warn("Could not parse `bd stale --json`", {
+        error: error instanceof Error ? error.message : String(error),
+      });
       report.staleIssues = 0;
     }
   }
@@ -927,7 +956,10 @@ async function checkBeads(
         title: String(o.title ?? ""),
         status: String(o.status ?? ""),
       }));
-    } catch {
+    } catch (error) {
+      logger.warn("Could not parse `bd orphans --json`", {
+        error: error instanceof Error ? error.message : String(error),
+      });
       report.orphans = [];
     }
   }
@@ -980,8 +1012,10 @@ async function checkBeads(
           target: check,
         });
       }
-    } catch {
-      // Older bd emits non-JSON for some checks; ignore.
+    } catch (error) {
+      logger.warn(`Could not parse \`bd doctor --check=${check} --json\``, {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -1011,6 +1045,12 @@ async function doCheck(ctx: ModelContext): Promise<{
   const nowMs = Date.now();
   const defaultBranch = await detectDefaultBranch(dir, cfg.defaultBranch);
 
+  ctx.logger.info("Housekeeping check starting in {dir}", {
+    dir,
+    beads: cfg.includeBeads,
+    temp: cfg.includeTemp,
+  });
+
   const findings: Finding[] = [];
   const git = await checkGit(dir, defaultBranch);
   findings.push(...git.findings);
@@ -1027,7 +1067,7 @@ async function doCheck(ctx: ModelContext): Promise<{
 
   let beads: BeadsReport | null = null;
   if (cfg.includeBeads) {
-    const beadsResult = await checkBeads(dir, nowMs, cfg);
+    const beadsResult = await checkBeads(dir, nowMs, cfg, ctx.logger);
     beads = beadsResult.report;
     findings.push(...beadsResult.findings);
   }
@@ -1087,6 +1127,11 @@ async function pruneWorktrees(
   const dryRun = args.dryRun ?? true;
   const verbose = args.verbose ?? false;
 
+  ctx.logger.info("Pruning worktrees in {dir} (dryRun={dryRun})", {
+    dir,
+    dryRun,
+  });
+
   const raw = await stdout(["git", "worktree", "list", "--porcelain"], dir);
   const worktrees = raw ? parseWorktreeList(raw) : [];
   for (const wt of worktrees) wt.pathExists = await pathExists(wt.path);
@@ -1139,7 +1184,12 @@ async function unclaimStaleBeads(
   const reason = args.reason ?? "housekeeping: stale claim";
   const bdBin = cfg.bdBin;
 
-  const beadsReport = await checkBeads(dir, Date.now(), cfg);
+  ctx.logger.info("Releasing stale tracker claims in {dir} (dryRun={dryRun})", {
+    dir,
+    dryRun,
+  });
+
+  const beadsReport = await checkBeads(dir, Date.now(), cfg, ctx.logger);
   const candidates = beadsReport.report.staleClaims;
 
   const released: string[] = [];
@@ -1187,6 +1237,11 @@ async function cleanTemp(
   const dir = await resolveProjectDir(cfg.projectDir);
   const dryRun = args.dryRun ?? true;
   const force = args.force ?? false;
+
+  ctx.logger.info("Cleaning temp debris in {dir} (dryRun={dryRun})", {
+    dir,
+    dryRun,
+  });
 
   const tempReport = await checkTemp(dir, Date.now(), cfg);
   const candidates = tempReport.report.entries.filter((e) => e.stale);
@@ -1248,7 +1303,7 @@ const CleanReportSchema = z.object({
 
 export const model = {
   type: "@maphew/housekeeping",
-  version: "2026.10.15.3",
+  version: "2026.10.15.4",
   upgrades: [
     {
       toVersion: "2026.10.15.2",
@@ -1260,6 +1315,12 @@ export const model = {
       toVersion: "2026.10.15.3",
       description:
         "Quote the bundled workflow name so the scoped @maphew/housekeeping identifier parses as YAML; no schema, method, or resource changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.15.4",
+      description:
+        "Adversarial-review fixes: entry logging in every method; warn on bd JSON parse failure and on a missing bd binary; report when the default branch cannot be resolved for merged-branch detection; expand default-branch candidates to trunk/develop",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
