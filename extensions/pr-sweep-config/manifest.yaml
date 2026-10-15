@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/pr-sweep-config"
-version: 2026.10.14.1
+version: 2026.10.15.1
 description: >-
   File-backed configuration store for PR sweep repository pairs (upstream +
   fork), with enabled/disabled flags, a markdown summary, and methods to add,

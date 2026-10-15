@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/repo-doctor",
+  "version": "2026.10.15.1",
+  "reviewedAt": "2026-10-15T04:30:59Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. Global args are repo-relative paths and a boolean; no vault refs needed."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "Structured placeholders throughout ('Scanned {files} file(s) ...', 'Checked {n} pulled extension(s) ...', 'Scan complete: {e} error(s), {w} warning(s)'). No interpolation and no sensitive data."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "walk() now wraps the readDir iteration itself, so a missing/unreadable directory yields nothing instead of throwing \u2014 this fixes scan crashing on a pulled extension with no files/ tree (e.g. the retired @maphew/quest-claim). checkExtensions now verifies the manifest's declared additionalFiles on disk instead of the previous dead no-op loop. Unreadable source files are still skipped, which is appropriate for a best-effort scanner."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "repo_doctor_test.ts covers relative(), offendingLines() (hit and no-hit), isCovered() (exact/prefix/parent, comments, negation), renderReport() (healthy/empty and grouped-by-severity), and parseManifestList() (block parsing, absent key, quote stripping). The filesystem-walking methods are not unit-tested."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "Read-only checks; reruns are idempotent. scan() writes all five outputs in one pass, so a failure throws before a partial report is exposed."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "na",
+      "note": "No external HTTP or network calls; only local filesystem reads."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Uses Deno.readDir/readFile/stat only; every handle is closed by the runtime on return. No temp files or connections."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README uses generic paths (.swamp/..., extensions/models) and no real hostnames or account identifiers. Test fixtures use placeholder usernames (/home/alice, /home/maphew) as non-portable-path examples."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); CEL validation works."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "Every resource and the report file set lifetime 7d and garbageCollection 10, appropriate for a periodic health snapshot."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle model \u2014 it is an analysis scanner with no create/update/delete surface."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "na",
+      "note": "No mutating methods, so no pre-flight gate is required."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "scan() writes scan-current, paths-current, extensions-current, gitignore-current, report-current \u2014 unique per spec and consistent across the single- and multi-check methods."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "Stateless; reads no stored resources and uses no dataRepository access."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Bumped to 2026.10.14.2; upgrades chain has no-op entries for 2026.10.14.1 (re-home) and 2026.10.14.2 (checkExtensions fix) so existing instances advance their typeVersion."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass \u2014 FindingSchema has 6 fields (check, severity, file, line, message, detail); every finding push sets all 6. ScanReportSchema has 5 fields and scan() writes all 5. Paths/Extensions/Gitignore reports each match their write sites.",
+    "truncation-honesty": "na \u2014 no paginated or result-capped method.",
+    "instance-name-consistency": "pass \u2014 each spec has exactly one writer instance name (scan-current, paths-current, extensions-current, gitignore-current) plus the report file report-current.",
+    "schema-field-coverage": "pass \u2014 every declared field is written on the code path that produces the resource; no placeholders."
+  }
+}

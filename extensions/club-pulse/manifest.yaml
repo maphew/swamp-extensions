@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/club-pulse"
-version: 2026.10.14.2
+version: 2026.10.15.1
 description: >-
   Swamp Club points velocity. Samples a member's leaderboard score on a cadence,
   diffs consecutive samples, and buckets the deltas by minute, hour, and day into

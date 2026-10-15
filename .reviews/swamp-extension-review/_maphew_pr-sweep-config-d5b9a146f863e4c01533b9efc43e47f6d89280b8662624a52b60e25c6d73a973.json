@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/pr-sweep-config",
+  "version": "2026.10.15.1",
+  "reviewedAt": "2026-10-15T04:30:59Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credentials or tokens. The config holds repo slugs, display names, and local workdir paths \u2014 none sensitive."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "discoverConfig logs the loaded pair count and addRepoPair logs the derived id, using structured placeholders. No interpolation and no sensitive data."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "readConfigFile now distinguishes an absent file (returns an empty config) from a present-but-malformed one (parse/validation errors propagate). This prevents a corrupt config from being silently treated as empty and then overwritten by the next write. Write errors propagate."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "pr_sweep_config_test.ts covers deriveId (case, separators, leading/trailing dashes) and renderConfigSummary (empty state and a table row per pair, including the enabled flag). File I/O methods are not unit-tested."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "issue",
+      "note": "addRepoPair derives a stable id from the name but does not check for an existing id, so adding a pair with a name already present creates a duplicate entry. removeRepoPair filters all entries with that id, so a duplicate is recoverable. Non-blocking; pre-existing behaviour."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "na",
+      "note": "No external HTTP or network calls; a local JSON file is the only interface."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Reads/writes one JSON file with Deno.readFile/writeFile; no handles, connections, or temp files to leak."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README uses example repos (Kilo-Org/kilocode, maphew/kilocode) and generic paths; no secrets or internal infrastructure identifiers."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); CEL validation works."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "The config resource and summary file set lifetime 365d and garbageCollection 10, appropriate for durable operator configuration."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "pass",
+      "note": "Full configuration surface: discover (read), addRepoPair, removeRepoPair (delete), toggleRepoPair, updateRepoPair."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "na",
+      "note": "No external mutation; the model only writes its local config file and data resources."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "config-current and summary-current are unique and written by every method via discoverConfig."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "The source of truth is the local JSON file; the model reads no stored swamp resources."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Bumped to 2026.10.14.1 with a no-op upgrades entry (source moved to swamp-extensions; no schema changes) so existing instances advance from the 2026.09.29.2 published baseline."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass \u2014 ConfigSchema.repoPairs and RepoPairSchema fields are written by addRepoPair with defaults for optional fields; discoverConfig always writes the whole parsed config.",
+    "truncation-honesty": "na \u2014 no paginated or result-capped method.",
+    "instance-name-consistency": "pass \u2014 config-current and summary-current are written by every method with identical shape.",
+    "schema-field-coverage": "pass \u2014 every declared field has a producing code path; notes is optional and absent unless set."
+  }
+}

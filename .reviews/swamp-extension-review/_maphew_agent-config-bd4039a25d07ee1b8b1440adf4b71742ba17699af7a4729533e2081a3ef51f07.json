@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/agent-config",
+  "version": "2026.10.15.1",
+  "reviewedAt": "2026-10-15T04:30:59Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. Global args are manifest paths, config-dir names, and a projectOwnedDirs allowlist."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "Structured placeholder logging ('Inventoried {e} enrolled and {c} customized tool(s), {err} error(s), {w} warning(s)'); no interpolation and no secret values (config file contents are inventoried as paths, not bodies)."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "Missing or unparseable manifests are surfaced as explicit findings (unreadable-manifest) rather than throwing, which matches the model's job of reporting drift. File reads use readTextIfPresent and return null instead of throwing."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "New agent_config_test.ts covers unquote(), parseEnrollment() (present and empty), and parseCustomTools() (tool definitions, null defaults, gitignoreEntries aggregation across tools, and empty input). The filesystem buildInventory path is not unit-tested."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "Read-only inventory; reruns are idempotent and write no external state."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "na",
+      "note": "No external HTTP or network calls; local filesystem and regex parsing only."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Deno.readDir/readFile/stat only; no open connections, temp files, or unclosed handles."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README and tests use generic tool/config names (.claude, .codex, .kilo, .opencode) and .swamp paths. No real hostnames, IPs, or account identifiers."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); CEL validation works."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "inventory and drift resources plus the report file set lifetime 7d and garbageCollection 10."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle model \u2014 it is a read-only inventory/drift analyzer."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "na",
+      "note": "No mutating methods, so no pre-flight gate is required."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "inventory() writes inventory-current, drift-current, report-current; checkDrift() writes drift-current \u2014 same spec and shape, no collisions."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "Stateless; reads no stored resources and uses no dataRepository access."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Bumped to 2026.10.14.1 and added a no-op upgrades entry (source moved to swamp-extensions; no schema changes) so existing instances advance their typeVersion."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass \u2014 ToolSchema/ToolEntry fields (name, enrolled, customized, configDir, configDirExists, instructionsFile, instructionsExists, skillsDir, skillsDirExists, files) are all populated in the per-tool loop. InventorySchema fields match the buildInventory object; DriftReportSchema fields (projectDir, findings, errorCount, warningCount) all set.",
+    "truncation-honesty": "na \u2014 no paginated or result-capped method.",
+    "instance-name-consistency": "pass \u2014 drift-current is written by both inventory() and checkDrift() with an identical DriftReportSchema shape; inventory-current and report-current are written only by inventory().",
+    "schema-field-coverage": "pass \u2014 every declared field has a producing code path; nullable instruction/skills fields are set from the custom definition, and no placeholder writes were found."
+  }
+}

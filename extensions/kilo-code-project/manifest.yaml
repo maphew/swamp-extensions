@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/kilo-code-project"
-version: 2026.10.14.1
+version: 2026.10.15.1
 description: >-
   Discover and summarize Kilo Code CLI configuration for a project — commands,
   agents, skills, instruction files, permissions, MCPs, config files, and Agent
