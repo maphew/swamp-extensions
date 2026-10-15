@@ -1,5 +1,5 @@
 id: 7b6f6d2e-2e2c-4d2a-9d0f-0e6f6b1a4c31
-name: @maphew/housekeeping
+name: "@maphew/housekeeping"
 description: >-
   Run the read-only housekeeping sweep and refresh the markdown report.
   Requires a model instance named `housekeeping` created from @maphew/housekeeping.

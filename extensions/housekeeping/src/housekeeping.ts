@@ -1248,7 +1248,21 @@ const CleanReportSchema = z.object({
 
 export const model = {
   type: "@maphew/housekeeping",
-  version: "2026.10.15.1",
+  version: "2026.10.15.3",
+  upgrades: [
+    {
+      toVersion: "2026.10.15.2",
+      description:
+        "Packaging fix: list the bundled workflow by basename so it extracts to extension/workflows/workflow-housekeeping.yaml and registers; no schema, method, or resource changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.15.3",
+      description:
+        "Quote the bundled workflow name so the scoped @maphew/housekeeping identifier parses as YAML; no schema, method, or resource changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
   globalArguments: GlobalArgsSchema,
   resources: {
     audit: {

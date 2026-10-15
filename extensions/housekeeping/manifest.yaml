@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/housekeeping"
-version: 2026.10.15.1
+version: 2026.10.15.3
 description: >-
   Generic, portable housekeeping sweep for any checkout. A read-only audit of
   dirty trees, diverged or deleted branches, forgotten stashes, stale worktrees,
@@ -15,7 +15,7 @@ paths:
 models:
   - src/housekeeping.ts
 workflows:
-  - workflows/workflow-housekeeping.yaml
+  - workflow-housekeeping.yaml
 vaults: []
 datastores: []
 reports: []
