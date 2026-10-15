@@ -7,6 +7,7 @@ description: >-
   Manager state — without running Kilo or mutating project files. Optional
   secret redaction by default.
 repository: "https://github.com/maphew/swamp-extensions.git"
+license: AGPL-3.0-only
 paths:
   base: manifest
 models:

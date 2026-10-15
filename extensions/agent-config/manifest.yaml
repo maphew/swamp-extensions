@@ -7,6 +7,7 @@ description: >-
   (.swamp-custom-tools.yaml), and on-disk state. Distinguishes a tool that is
   merely un-customised from one that is genuinely missing or orphaned.
 repository: "https://github.com/maphew/swamp-extensions.git"
+license: AGPL-3.0-only
 paths:
   base: manifest
 models:
