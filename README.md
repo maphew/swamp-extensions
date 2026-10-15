@@ -21,6 +21,7 @@ swamp extension push extensions/<package>/manifest.yaml
 | `club-pulse`   | `@maphew/club-pulse`        | Swamp Club points velocity: samples, buckets, and dashboard     |
 | `pr-sweep-config` | `@maphew/pr-sweep-config` | PR sweep repository-pair configuration store                  |
 | `pr-sweep`     | `@maphew/pr-sweep`          | Sweep fork PRs: review, update, and merge, with per-PR results  |
+| `agent-task`   | `@maphew/agent-task`        | Headless agent dispatch: queue filter, branch+run, and fan-out sweep |
 | `handoff`      | `@maphew/handoff`           | Exact-state handoffs: Git + Bead snapshot, narrative, resume brief |
 
 ## Layout
