@@ -1,13 +1,13 @@
 manifestVersion: 1
 name: "@maphew/club-pulse"
-version: 2026.10.15.1
+version: 2026.10.15.2
 description: >-
   Swamp Club points velocity. Samples a member's leaderboard score on a cadence,
   diffs consecutive samples, and buckets the deltas by minute, hour, and day into
   a markdown report and a self-contained HTML dashboard. Two methods (sample,
   pulse) plus a bundled club-pulse workflow and a pulse-view dashboard viewer.
 repository: "https://github.com/maphew/swamp-extensions.git"
-license: AGPL-3.0-only
+license: MIT
 paths:
   base: manifest
 models:

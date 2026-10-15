@@ -89,3 +89,7 @@ This will generate a self-contained HTML file and open it in your default browse
 The page follows the system light/dark setting by default. The
 toggle in the corner cycles system -> light -> dark and
 remembers the choice.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

@@ -64,4 +64,4 @@ does not scrub secrets embedded in free text or markdown.
 
 ## License
 
-AGPL-3.0. See [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

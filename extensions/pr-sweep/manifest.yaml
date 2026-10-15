@@ -1,13 +1,13 @@
 manifestVersion: 1
 name: "@maphew/pr-sweep"
-version: 2026.10.15.1
+version: 2026.10.15.2
 description: >-
   Sweep open pull requests a fork contributes to an upstream GitHub repo: an
   adversarial review, findings addressed, branches brought up to date, and
   merges — with queryable per-PR and run-summary resources. Ships the sweeper
   prompt as a bundled asset.
 repository: "https://github.com/maphew/swamp-extensions.git"
-license: AGPL-3.0-only
+license: MIT
 paths:
   base: manifest
 models:

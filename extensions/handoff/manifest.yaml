@@ -1,13 +1,13 @@
 manifestVersion: 1
 name: "@maphew/handoff"
-version: 2026.10.15.3
+version: 2026.10.15.4
 description: >-
   Exact-state engineering handoffs. Captures a deterministic, secret-free
   snapshot of Git worktree state plus the authoritative active Bead, records the
   narrative (goal, scope, commands, decisions, next safe step, forbidden
   operations), and writes a queryable handoff resource and a markdown report.
 repository: "https://github.com/maphew/swamp-extensions.git"
-license: AGPL-3.0-only
+license: MIT
 paths:
   base: manifest
 models:

@@ -128,4 +128,4 @@ caller supplies via `commands`.
 
 ## License
 
-AGPL-3.0. See [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

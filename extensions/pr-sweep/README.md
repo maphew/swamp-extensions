@@ -84,4 +84,4 @@ swamp data query 'modelName == "pr-sweep" && name == "summary-current"' --select
 
 ## License
 
-AGPL-3.0. See [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

@@ -1,13 +1,13 @@
 manifestVersion: 1
 name: "@maphew/pr-sweep-config"
-version: 2026.10.15.1
+version: 2026.10.15.2
 description: >-
   File-backed configuration store for PR sweep repository pairs (upstream +
   fork), with enabled/disabled flags, a markdown summary, and methods to add,
   remove, toggle, and update pairs. The companion to the @maphew/pr-sweep
   workflow.
 repository: "https://github.com/maphew/swamp-extensions.git"
-license: AGPL-3.0-only
+license: MIT
 paths:
   base: manifest
 models:

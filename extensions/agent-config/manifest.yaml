@@ -1,13 +1,13 @@
 manifestVersion: 1
 name: "@maphew/agent-config"
-version: 2026.10.15.1
+version: 2026.10.15.2
 description: >-
   Inventories enrolled AI-tool configs in a swamp repo and reports drift between
   the enrollment manifest (.swamp.yaml tools:), the custom-tool definitions
   (.swamp-custom-tools.yaml), and on-disk state. Distinguishes a tool that is
   merely un-customised from one that is genuinely missing or orphaned.
 repository: "https://github.com/maphew/swamp-extensions.git"
-license: AGPL-3.0-only
+license: MIT
 paths:
   base: manifest
 models:

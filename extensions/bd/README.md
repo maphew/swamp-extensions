@@ -126,6 +126,6 @@ editing the source.
 
 ## License
 
-[AGPL-3.0](./LICENSE). Source lives in
+[MIT](./LICENSE). Source lives in
 [maphew/swamp-extensions](https://github.com/maphew/swamp-extensions) under
 `extensions/bd/`.
