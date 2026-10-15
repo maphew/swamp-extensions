@@ -1,5 +1,5 @@
 id: a0ce58fc-b119-4f40-8e8f-ea13a70b054b
-name: @maphew/club-pulse
+name: "@maphew/club-pulse"
 description: >-
   Sample the tracked Swamp Club member's points on a fixed cadence and refresh
   the minute / hour / day pulse report. Sampling cadence bounds bucket

@@ -524,13 +524,19 @@ type ModelContext = {
 
 export const model = {
   type: "@maphew/club-pulse",
-  version: "2026.10.14.2",
+  version: "2026.10.15.3",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
       toVersion: "2026.10.14.2",
       description:
         "Bundled workflow references the managed club-pulse instance (modelIdOrName) so the required username global arg is read from the instance; no model schema changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.15.3",
+      description:
+        "Packaging fix: quote the bundled workflow name so the scoped @maphew/club-pulse identifier parses as YAML, and list the workflow by basename so it packs and registers; no model schema changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

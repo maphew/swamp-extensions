@@ -679,7 +679,7 @@ async function heatmap(
  */
 export const model = {
   type: "@maphew/swamp-tide",
-  version: "2026.10.08.3",
+  version: "2026.10.15.3",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -693,6 +693,12 @@ export const model = {
       description: "tide-view follows the system light/dark setting with a " +
         "persisted override; extension relocated to the " +
         "swamp-extensions repo",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.15.3",
+      description:
+        "Packaging fix: quote the bundled workflow name so the scoped @maphew/swamp-tide identifier parses as YAML, and list the workflow by basename so it packs and registers; no model schema changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
