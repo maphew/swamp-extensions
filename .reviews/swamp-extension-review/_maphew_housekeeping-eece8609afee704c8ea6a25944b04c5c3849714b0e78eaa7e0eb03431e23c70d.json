@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/housekeeping",
+  "version": "2026.10.15.3",
+  "reviewedAt": "2026-10-15T20:17:43Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. bdBin is a binary name or path, not a secret; no vault refs needed."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "issue",
+      "note": "Methods log completion with structured placeholders ('Housekeeping check: {w} warning(s), {e} error(s)', 'Would prune {n} worktree(s)', etc.) but log nothing on entry. Add an info line at the start of each method naming projectDir and the enabled check set. Fix tracked as a follow-up; not a blocker."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "issue",
+      "note": "The four bd JSON.parse sites (in-progress list, stale, orphans, doctor) catch and swallow silently, so malformed or shape-changed bd output yields an empty result with no warning. run() also catches every spawn error and returns null, so a missing binary is indistinguishable from a permission or cwd failure; log at debug before returning null. checkGit throws a descriptive error when git is unavailable or the dir is not a repo, and the mutation methods collect per-item failures instead of aborting the batch, both correct."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "issue",
+      "note": "housekeeping_test.ts covers the pure parsers (16 tests) but no method or IO path: checkGit, checkBeads, checkTemp, and the three mutation methods are untested, and there are no failure-path tests. The sibling repo-doctor extension has the same gap and ships it, so this is consistent with the repo but still a real gap."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "check is read-only and re-runnable. pruneWorktrees/unclaimStaleBeads/cleanTemp are idempotent and dry-run by default; per-item failures are collected rather than aborting the batch."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "issue",
+      "note": "Relies on undocumented CLI output shapes: git status --porcelain=v1 --branch, git for-each-ref --format, git worktree list --porcelain, bd --version, bd list/stale/orphans/doctor --json. No shape validation; drift is silently ignored (see error-handling). Separately, defaultBranch falls back to 'main', so a repo whose mainline is named otherwise silently reports no merged branches (use the override)."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Every Deno.Command is awaited via output() and closed by the runtime; no temp files, sockets, or long-lived handles. du/pgrep/df are optional and absent-safe."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README and examples use generic paths ($TMPDIR, projectDir, extensions/housekeeping) and scoped names; no real hostnames, IPs, account IDs, or internal topology."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); CEL validation works."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "All 9 resource/file specs declare lifetime and garbageCollection: audit/git/worktrees/temp/beads/report at 7d, the three cleanup results at 30d, all GC 10."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle behavior: it audits local state and performs explicitly gated cleanup, with no create/update/delete/sync surface."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "pass",
+      "note": "No formal check labels, but each mutating method is dry-run by default and returns the candidate list before any mutation, which is the deliberate guard (notice-and-report posture)."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "Distinct instance names per spec within a run (audit-current, git-current, worktrees-current, temp-current, beads-current, worktree-prune-current, bead-unclaim-current, temp-clean-current); repeated runs intentionally overwrite the *-current records (latest wins)."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "No update/delete/sync readback of stored state; methods write fresh audit resources and never read prior versions."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "No-op upgrade entries recorded for 2026.10.15.2 (workflow basename packaging) and 2026.10.15.3 (workflow name quoting)."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — AuditSchema (projectDir, checkedAt, verdict, errorCount, warningCount, infoCount, findings) is written whole by check(); GitReportSchema, WorktreesReportSchema, TempReportSchema, and BeadsReportSchema each match their write site; the shared CleanReportSchema accepts the prune/unclaim/temp shapes because every differential field is optional. Conditional temp/beads resources are written only when present.",
+    "truncation-honesty": "na — no paginated or result-capped method. The process finding shows the first 5 lines in its detail string, but the full list is retained in the temp resource's processes array.",
+    "instance-name-consistency": "pass — each spec has exactly one writer instance name, and no two specs in a run share an instance name.",
+    "schema-field-coverage": "pass — every declared field is written on the path that produces its resource; no field is hardcoded to a placeholder where real data is expected."
+  }
+}
