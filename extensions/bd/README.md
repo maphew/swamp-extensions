@@ -34,6 +34,7 @@ swamp model create @maphew/bd my-tracker
 | `dep`    | Manage dependencies: `add`/`remove`/`list` for an issue        |
 | `reclaim`| Revert stale in_progress issues to open (dead-worker recovery) |
 | `graph`  | Dependency graph as structured nodes, typed edges, and layers  |
+| `prime`  | Capture bd prime workflow context and git-authority policy     |
 
 ```bash
 # What can I work on right now?
@@ -74,6 +75,13 @@ swamp model method run @maphew/bd reclaim my-tracker \
 # Dependency graph for Mermaid rendering; upstream requires a rootId
 swamp model method run @maphew/bd graph my-tracker \
   --input '{"rootId":"bd-123","direction":"both","depth":3}'
+
+# Capture the live workflow context and git-authority policy
+swamp model method run @maphew/bd prime my-tracker --json
+
+# Persist only persistent memories, capped
+swamp model method run @maphew/bd prime my-tracker \
+  --input '{"memories":"only","maxMemories":20}'
 ```
 
 Every method writes normalized issue resources (`spec: issue`), so results are
@@ -87,6 +95,15 @@ no root anchors the layering).
 expiry (bd's default is 10m) and `ids` narrows to specific issues. Issues that
 were actually reverted come back as issue resources with fresh fields, so a
 nightly workflow can reclaim stale work and reassign it to the ready pool.
+
+`prime` writes a single `primeContext` resource instead of issue resources: the
+`bd prime` workflow text (the same session-close protocol and git-authority
+policy harnesses inject at session start), the parsed `agent.profile`
+(`conservative` | `minimal` | `team-maintainer`, or null), and a `generatedAt`
+timestamp. Options mirror bd's own flags: `memories`
+(`include`/`only`/`exclude`), `maxMemories`, and `maxMemoryChars`. Point a
+workflow guard or report at it to assert the active profile without re-running
+the CLI.
 
 `list`, `query`, and `ready` take a `limit` (default 50, max 500) and set `truncated:
 true` on every returned issue when more matched than the limit allowed. The

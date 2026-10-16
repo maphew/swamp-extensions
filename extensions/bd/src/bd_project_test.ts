@@ -102,7 +102,9 @@ Deno.test("@maphew/bd create/show/update/close round-trip", async () => {
     const shown = [...ctx.written.values()][0];
     assertEquals(shown.id, id);
     assertEquals(shown.title, "test issue");
-    assertEquals(shown.owner !== null, true);
+    // owner is the assignee; it is null unless bd derives one from the local
+    // git identity, which CI runners do not have
+    assert(shown.owner === null || typeof shown.owner === "string");
 
     ctx.written.clear();
     await runMethod(
@@ -557,4 +559,56 @@ Deno.test("@maphew/bd graph upstream requires a rootId", () => {
     () => model.methods.graph.arguments.parse({ direction: "upstream" }),
     "requires rootId",
   );
+});
+
+Deno.test("@maphew/bd prime captures the workflow context", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    const result = await runMethod("prime", {}, ctx);
+    assertEquals(result.dataHandles?.length, 1);
+    const resource = ctx.written.get("prime-current")!;
+    assertStringIncludes(String(resource.content), "Beads Workflow Context");
+    assertEquals(typeof resource.generatedAt, "string");
+    assert(resource.profile === null || typeof resource.profile === "string");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd prime honors memories modes", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    const remember = new Deno.Command("bd", {
+      args: ["remember", "prime memory probe"],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    });
+    assert((await remember.output()).success);
+
+    ctx.written.clear();
+    await runMethod("prime", {}, ctx);
+    assertStringIncludes(
+      String(ctx.written.get("prime-current")!.content),
+      "Persistent Memories",
+    );
+
+    ctx.written.clear();
+    await runMethod("prime", { memories: "exclude" }, ctx);
+    assert(
+      !String(ctx.written.get("prime-current")!.content).includes(
+        "Persistent Memories",
+      ),
+    );
+
+    ctx.written.clear();
+    await runMethod("prime", { memories: "only", maxMemories: 1 }, ctx);
+    const only = String(ctx.written.get("prime-current")!.content);
+    assertStringIncludes(only, "Persistent Memories");
+    assert(!only.includes("Beads Workflow Context"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
