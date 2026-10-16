@@ -18,6 +18,7 @@
  *   - `reclaim` revert stale in_progress issues back to open (dead-worker recovery)
  *   - `graph`  return the dependency graph as structured nodes, typed edges,
  *              and layers (ready for rendering as a Mermaid graph)
+ *   - `prime`  capture the bd prime workflow context and git-authority policy
  *
  * Failures throw with the bd exit code, stderr, and stdout so failed
  * method runs are diagnosable from reports and workflow logs.
@@ -188,6 +189,19 @@ const ReclaimArgsSchema = z.object({
   ),
 });
 
+/** Arguments for the `prime` method. */
+const PrimeArgsSchema = z.object({
+  memories: z.enum(["include", "only", "exclude"]).default("include").describe(
+    "Persistent-memory section: include (default), only (that section alone), or exclude (omit it)",
+  ),
+  maxMemories: z.number().int().min(0).optional().describe(
+    "Cap the number of injected memories (0 = unlimited); whole memories only",
+  ),
+  maxMemoryChars: z.number().int().min(0).optional().describe(
+    "Cap the total characters of injected memories (0 = unlimited)",
+  ),
+});
+
 /** Schema for a dependency-graph node. */
 const GraphNodeSchema = z.object({
   id: z.string(),
@@ -232,6 +246,17 @@ const GraphArgsSchema = z.object({
   { message: "direction upstream/both requires rootId" },
 );
 
+/** Schema for the bd prime workflow-context resource. */
+const PrimeContextSchema = z.object({
+  content: z.string().describe(
+    "The bd prime workflow context and git-authority policy text",
+  ),
+  profile: z.string().nullable().describe(
+    "Parsed agent.profile (conservative|minimal|team-maintainer), or null when absent",
+  ),
+  generatedAt: z.string().describe("When the context was captured"),
+});
+
 /** Global arguments configuring how the bd CLI is invoked. */
 const GlobalArgsSchema = z.object({
   bdCommand: z.string().default("bd").describe(
@@ -270,6 +295,8 @@ type ReopenArgs = z.infer<typeof ReopenArgsSchema>;
 type ReclaimArgs = z.infer<typeof ReclaimArgsSchema>;
 /** Validated `graph` arguments. */
 type GraphArgs = z.infer<typeof GraphArgsSchema>;
+/** Validated `prime` arguments. */
+type PrimeArgs = z.infer<typeof PrimeArgsSchema>;
 
 // ---------- helpers ---------------------------------------------------------
 
@@ -830,6 +857,46 @@ async function reclaimIssues(
   return { dataHandles: handles };
 }
 
+async function primeContext(
+  args: Record<string, unknown>,
+  ctx: MethodCtx,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const parsed = PrimeArgsSchema.parse(args);
+
+  const bdArgs = ["prime"];
+  if (parsed.memories === "only") bdArgs.push("--memories-only");
+  if (parsed.memories === "exclude") bdArgs.push("--no-memories");
+  if (parsed.maxMemories !== undefined) {
+    bdArgs.push("--max-memories", String(parsed.maxMemories));
+  }
+  if (parsed.maxMemoryChars !== undefined) {
+    bdArgs.push("--max-memory-chars", String(parsed.maxMemoryChars));
+  }
+
+  const { stdout } = await runBdStrict(
+    "prime",
+    cfg.bdCommand,
+    bdArgs,
+    cfg.bdDir,
+    ctx.logger,
+  );
+
+  const content = stdout.trim();
+  const profile = /agent\.profile=([A-Za-z-]+)/.exec(content)?.[1] ?? null;
+  const handle = await ctx.writeResource("primeContext", "prime-current", {
+    content,
+    profile,
+    generatedAt: new Date().toISOString(),
+  });
+
+  ctx.logger.info(
+    "Captured bd prime context ({chars} chars, profile {profile})",
+    { chars: content.length, profile: profile ?? "unknown" },
+  );
+  return { dataHandles: [handle] };
+}
+
 async function showGraph(
   args: Record<string, unknown>,
   ctx: MethodCtx,
@@ -1017,7 +1084,7 @@ async function showGraph(
 /** Swamp model definition for the beads issue tracker bridge. */
 export const model = {
   type: "@maphew/bd",
-  version: "2026.10.07.2",
+  version: "2026.10.16.1",
   globalArguments: GlobalArgsSchema,
   checks: {
     "bd-usable": {
@@ -1068,6 +1135,12 @@ export const model = {
         "Add dep, reopen, reclaim, and graph methods and the dependencyGraph resource; existing methods unchanged",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
+    {
+      toVersion: "2026.10.16.1",
+      description:
+        "Add prime method and primeContext resource; existing methods and resources unchanged",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
   ],
   resources: {
     issue: {
@@ -1080,6 +1153,13 @@ export const model = {
       description:
         "A BD dependency graph: nodes (id, title, status), typed edges (from depends on to), and optional layers",
       schema: DependencyGraphSchema,
+      lifetime: "30d" as const,
+      garbageCollection: 10,
+    },
+    primeContext: {
+      description:
+        "The bd prime workflow context and git-authority policy text, with its parsed agent.profile",
+      schema: PrimeContextSchema,
       lifetime: "30d" as const,
       garbageCollection: 10,
     },
@@ -1178,6 +1258,15 @@ export const model = {
         args: Record<string, unknown>,
         ctx: Parameters<typeof showGraph>[1],
       ) => showGraph(args, ctx),
+    },
+    prime: {
+      description:
+        "Capture the bd prime workflow context and git-authority policy as a resource",
+      arguments: PrimeArgsSchema,
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Parameters<typeof primeContext>[1],
+      ) => primeContext(args, ctx),
     },
   },
 };
