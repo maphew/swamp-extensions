@@ -9,6 +9,7 @@ import {
   basename,
   classifyTerminal,
   desktopEntryDirs,
+  detectMultiplexer,
   dirname,
   joinPath,
   mergeGhosttyConfig,
@@ -18,6 +19,7 @@ import {
   parseEnrollment,
   planKeymapFromProbe,
   readProcAncestry,
+  renderTerminalReport,
   resolveGhosttyConfigPath,
   resolvePiAgentDir,
   sha256Hex,
@@ -311,6 +313,92 @@ Deno.test("readProcAncestry reports /proc availability without throwing", async 
   }
 });
 
+Deno.test("detectMultiplexer prefers herdr over tmux", () => {
+  assertEquals(detectMultiplexer({ HERDR_PANE_ID: "w4:p2" }), "herdr");
+  assertEquals(
+    detectMultiplexer({ HERDR_PANE_ID: "w4:p2", TMUX: "/tmp/t" }),
+    "herdr",
+  );
+  assertEquals(detectMultiplexer({ TMUX: "/tmp/t" }), "tmux");
+  assertEquals(detectMultiplexer({}), "none");
+});
+
+Deno.test("renderTerminalReport summarizes a full apply run", () => {
+  const md = renderTerminalReport(
+    true,
+    {
+      outerTerminal: "ghostty",
+      outerSupportsModifiedEnter: true,
+      platform: "linux",
+      gnomeDetected: true,
+      multiplexer: "none",
+    },
+    {
+      strategy: "kitty-protocol",
+      reason: "distinct modified Enter",
+      submitChord: "ctrl+enter",
+      newLineChord: "enter",
+      followUpChord: null,
+    },
+    { path: "/h/.pi/agent/keybindings.json", changed: true, contentHash: "abc" },
+    {
+      resolvedPath: "/h/.config/ghostty/config.ghostty",
+      changed: true,
+      contentHash: "def",
+      removedConflictingKeybinds: 1,
+      ghosttyDetected: true,
+    },
+    {
+      listPath: "/h/.config/xdg-terminals.list",
+      changed: true,
+      desiredDesktopId: "com.mitchellh.ghostty.desktop",
+      printIdBefore: "x",
+      printIdAfter: "com.mitchellh.ghostty.desktop",
+    },
+    {
+      ghosttyInstalled: true,
+      ctrlEnterPresent: false,
+      fontFamilyResolved: "Iosevka",
+      fontFamilyMatches: true,
+    },
+  );
+  assertEquals(md.includes("Mode: **apply**"), true);
+  assertEquals(md.includes("`ghostty`"), true);
+  assertEquals(md.includes("kitty-protocol"), true);
+  assertEquals(md.includes("Removed 1 conflicting"), true);
+  assertEquals(md.includes("## Press test"), true);
+});
+
+Deno.test("renderTerminalReport flags diagnosis mode and VTE fallback", () => {
+  const md = renderTerminalReport(
+    false,
+    {
+      outerTerminal: "vte-ptyxis",
+      outerSupportsModifiedEnter: false,
+      platform: "linux",
+      gnomeDetected: true,
+      multiplexer: "tmux",
+      ancestryUnavailable: "needs --allow-all",
+    },
+    {
+      strategy: "alt-enter-fallback",
+      submitChord: "alt+enter",
+      newLineChord: "enter",
+      followUpChord: "ctrl+q",
+      tmuxWarning: "set extended-keys",
+    },
+    null,
+    null,
+    null,
+    null,
+  );
+  assertEquals(md.includes("Mode: **diagnosis**"), true);
+  assertEquals(md.includes("alt-enter-fallback"), true);
+  assertEquals(md.includes("set extended-keys"), true);
+  assertEquals(md.includes("ancestry unavailable"), true);
+  assertEquals(md.includes("Diagnosis only"), true);
+});
+
 // ---------- terminal-keymap method I/O ------------------------------------
 
 type MethodContext = Parameters<
@@ -318,26 +406,57 @@ type MethodContext = Parameters<
 >[1];
 
 /** Fake model context that captures writeResource calls instead of persisting. */
-function methodContext(): {
+function methodContext(
+  records: Record<string, Record<string, unknown>> = {},
+): {
   ctx: MethodContext;
   writes: Array<{ spec: string; name: string; data: Record<string, unknown> }>;
+  files: Record<string, string>;
 } {
   const writes: Array<
     { spec: string; name: string; data: Record<string, unknown> }
   > = [];
+  const files: Record<string, string> = {};
   const ctx = {
     globalArgs: {},
     writeResource: (spec: string, name: string, data: unknown) => {
       writes.push({ spec, name, data: data as Record<string, unknown> });
       return Promise.resolve({ name });
     },
-    createFileWriter: () => ({
-      writeText: () => Promise.resolve({ name: "report-current" }),
+    createFileWriter: (spec: string, name: string) => ({
+      writeText: (text: string) => {
+        files[`${spec}/${name}`] = text;
+        return Promise.resolve({ name });
+      },
     }),
+    readResource: (instance: string) =>
+      Promise.resolve(records[instance] ?? null),
     logger: { info: () => {}, warn: () => {} },
   } as unknown as MethodContext;
-  return { ctx, writes };
+  return { ctx, writes, files };
 }
+
+Deno.test("terminalReport reads latest data and writes markdown", async () => {
+  const { ctx, files } = methodContext({
+    "terminal-probe": {
+      outerTerminal: "ghostty",
+      outerSupportsModifiedEnter: true,
+      platform: "linux",
+      multiplexer: "none",
+    },
+    "keymap-plan": {
+      strategy: "kitty-protocol",
+      submitChord: "ctrl+enter",
+      newLineChord: "enter",
+    },
+  });
+  await model.methods.terminalReport.execute({ apply: false }, ctx);
+  const out = files["terminalReport/terminal-report-current"];
+  assertEquals(typeof out, "string");
+  assertEquals(out.includes("# Terminal keymap run"), true);
+  assertEquals(out.includes("`ghostty`"), true);
+  assertEquals(out.includes("Mode: **diagnosis**"), true);
+});
 
 Deno.test("applyPiKeybindings writes idempotently to a temp agent dir", async () => {
   const dir = await Deno.makeTempDir();

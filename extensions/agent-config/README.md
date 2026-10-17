@@ -46,6 +46,7 @@ swamp model create @maphew/agent-config agent-config
 | `applyGhosttyConfig`     | Idempotently merge font-family + `ctrl+enter` unbind into Ghostty config |
 | `applyXdgDefaultTerminal`| Point xdg-terminal-exec at the desired desktop entry (Linux/GNOME)      |
 | `verifyGhosttyConfig`    | Check `ghostty +show-config` dropped the ctrl+enter binding and font     |
+| `terminalReport`         | Render a markdown run summary from the latest terminal-keymap data      |
 
 ```bash
 # Full inventory plus markdown report
@@ -103,6 +104,7 @@ process had no ancestors.
 - `drift-current` — drift findings between enrollment, custom definitions, and
   disk
 - `report-current` — markdown report
+- `terminal-report-current` — markdown terminal-keymap-setup run summary
 - `terminal-probe` — outer terminal / multiplexer / platform classification
 - `xdg-default-terminal-current` — current gsettings + xdg-terminal-exec state
 - `keymap-plan` — effective chords and config snippets

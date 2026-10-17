@@ -142,6 +142,9 @@ type ModelContext = {
   createFileWriter: (spec: string, instance: string) => {
     writeText: (text: string) => Promise<{ name: string }>;
   };
+  readResource: (
+    instance: string,
+  ) => Promise<Record<string, unknown> | null>;
   logger: {
     info: (msg: string, props?: Record<string, unknown>) => void;
     warn: (msg: string, props?: Record<string, unknown>) => void;
@@ -613,6 +616,7 @@ const TerminalProbeSchema = z.object({
   ancestryUnavailable: z.string().nullable().describe(
     "Why /proc ancestry could not be read, or null when it was",
   ),
+  multiplexer: z.string().describe("herdr | tmux | none"),
   outerTerminal: z.string().describe("Classified outer terminal id"),
   outerSupportsModifiedEnter: z.boolean().describe(
     "Whether the outer terminal can report modified Enter distinctly",
@@ -760,6 +764,13 @@ const VerifyGhosttyConfigArgsSchema = z.object({
     .describe("Expected font family to compare against"),
 });
 
+const TerminalReportArgsSchema = z.object({
+  apply: z
+    .boolean()
+    .nullish()
+    .describe("Whether this was an apply run or diagnosis only"),
+});
+
 /** Environment variable map; injectable so the pure helpers are testable. */
 export type TerminalEnv = Record<string, string | undefined>;
 
@@ -790,6 +801,15 @@ export function detectGnome(env: TerminalEnv): boolean {
     env.GDMSESSION,
   ];
   return indicators.some((v) => (v ?? "").toLowerCase().includes("gnome"));
+}
+
+/** Multiplexer sitting between the outer terminal and the agent. */
+export function detectMultiplexer(
+  env: TerminalEnv,
+): "herdr" | "tmux" | "none" {
+  if (env.HERDR_PANE_ID) return "herdr";
+  if (env.TMUX) return "tmux";
+  return "none";
 }
 
 const VTE_TERMINALS = new Set([
@@ -1195,6 +1215,160 @@ export function desktopEntryDirs(env: TerminalEnv): string[] {
   return dirs.filter((d) => d.length > 0);
 }
 
+/** A data record read back for the terminal report, or null when absent. */
+type TerminalRecord = Record<string, unknown> | null;
+
+function fmt(v: unknown, fallback = "—"): string {
+  if (v === null || v === undefined || v === "") return fallback;
+  return String(v);
+}
+
+function yn(v: unknown): string {
+  return v === true ? "yes" : v === false ? "no" : "—";
+}
+
+/**
+ * Render the terminal-keymap run summary the converter plan asks for: detected
+ * chain, chosen strategy and chords, per-file apply results with content
+ * hashes (the drift baseline), verification outcomes, open warnings, and the
+ * non-automatable press-test note.
+ */
+export function renderTerminalReport(
+  apply: boolean,
+  probe: TerminalRecord,
+  plan: TerminalRecord,
+  pi: TerminalRecord,
+  ghostty: TerminalRecord,
+  xdg: TerminalRecord,
+  verify: TerminalRecord,
+): string {
+  const p = probe ?? {};
+  const k = plan ?? {};
+  const lines: string[] = [];
+  lines.push("# Terminal keymap run");
+  lines.push("");
+  lines.push(
+    `- Mode: **${apply ? "apply" : "diagnosis"}**${
+      apply ? "" : " (no config written)"
+    }`,
+  );
+  lines.push(
+    `- Outer terminal: \`${fmt(p.outerTerminal)}\` — modified Enter: ${
+      yn(p.outerSupportsModifiedEnter)
+    }`,
+  );
+  lines.push(
+    `- Platform: \`${fmt(p.platform)}\` · GNOME: ${
+      yn(p.gnomeDetected)
+    } · Multiplexer: \`${fmt(p.multiplexer, "unknown")}\``,
+  );
+  if (k.strategy) lines.push(`- Strategy: \`${fmt(k.strategy)}\``);
+  if (k.reason) lines.push(`- Reason: ${fmt(k.reason)}`);
+
+  lines.push("");
+  lines.push("## Effective chords");
+  lines.push("");
+  lines.push("| Action | Chord |");
+  lines.push("|--------|-------|");
+  lines.push(`| Submit | \`${fmt(k.submitChord)}\` |`);
+  lines.push(`| New line | \`${fmt(k.newLineChord)}\` |`);
+  lines.push(
+    `| Follow-up | \`${fmt(k.followUpChord, "unchanged (pi default)")}\` |`,
+  );
+
+  lines.push("");
+  lines.push("## Applied files");
+  lines.push("");
+  lines.push("| File | Path | Changed | SHA-256 |");
+  lines.push("|------|------|---------|---------|");
+  lines.push(
+    `| pi keybindings | \`${fmt(pi?.path)}\` | ${yn(pi?.changed)} | \`${
+      fmt(pi?.contentHash)
+    }\` |`,
+  );
+  lines.push(
+    `| Ghostty config | \`${fmt(ghostty?.resolvedPath)}\` | ${
+      yn(ghostty?.changed)
+    } | \`${fmt(ghostty?.contentHash)}\` |`,
+  );
+  lines.push(
+    `| xdg default terminal | \`${fmt(xdg?.listPath)}\` | ${
+      yn(xdg?.changed)
+    } | — |`,
+  );
+
+  lines.push("");
+  lines.push("## Verification");
+  lines.push("");
+  lines.push(`- Ghostty installed: ${yn(verify?.ghosttyInstalled)}`);
+  lines.push(
+    `- ctrl+enter still parsed: ${yn(verify?.ctrlEnterPresent)} (expected: no)`,
+  );
+  lines.push(
+    `- font-family resolved: \`${fmt(verify?.fontFamilyResolved)}\` (matches: ${
+      yn(verify?.fontFamilyMatches)
+    })`,
+  );
+  lines.push(
+    `- xdg-terminal-exec: \`${fmt(xdg?.printIdBefore)}\` → \`${
+      fmt(xdg?.printIdAfter)
+    }\` (desired \`${fmt(xdg?.desiredDesktopId)}\`)`,
+  );
+
+  const warnings: string[] = [];
+  if (p.ancestryUnavailable) {
+    warnings.push(`/proc ancestry unavailable: ${fmt(p.ancestryUnavailable)}`);
+  }
+  if (p.outerTerminal === "unknown") {
+    warnings.push(
+      "Outer terminal could not be classified; run the skill's Step 0 probes by hand.",
+    );
+  }
+  if (k.tmuxWarning) warnings.push(fmt(k.tmuxWarning));
+  if (k.herdrNote) warnings.push(fmt(k.herdrNote));
+  if (xdg?.noopReason) warnings.push(fmt(xdg.noopReason));
+  if (xdg?.gsettingsWarning) warnings.push(fmt(xdg.gsettingsWarning));
+  if (ghostty && ghostty.ghosttyDetected === false) {
+    warnings.push(
+      "Ghostty binary not found on PATH; installing it is out of scope.",
+    );
+  }
+  if (ghostty && Number(ghostty.removedConflictingKeybinds) > 0) {
+    warnings.push(
+      `Removed ${ghostty.removedConflictingKeybinds} conflicting ctrl+enter binding(s).`,
+    );
+  }
+  if (verify?.ctrlEnterPresent === true) {
+    warnings.push(
+      "Ghostty still parses a ctrl+enter binding after apply — check for a leaking default.",
+    );
+  }
+  if (verify?.fontFamilyMatches === false) {
+    warnings.push("Resolved font-family does not match the desired value.");
+  }
+  if (p.platform === "windows" || p.platform === "wsl") {
+    warnings.push(
+      "Windows/WSL specifics are verify-on-box: install channel, config path, and ConPTY behaviour.",
+    );
+  }
+  if (warnings.length > 0) {
+    lines.push("");
+    lines.push("## Warnings");
+    lines.push("");
+    for (const w of warnings) lines.push(`- ${w}`);
+  }
+
+  lines.push("");
+  lines.push("## Press test");
+  lines.push("");
+  lines.push(
+    apply
+      ? "Config was applied. The final check is the manual gate — press Enter (newline) then the submit chord in the target outer terminal; it cannot be machine-verified."
+      : "Diagnosis only; no config was written. Run again with `apply=true` to write and verify.",
+  );
+  return lines.join("\n") + "\n";
+}
+
 async function probeTerminalChain(
   _args: Record<string, never>,
   ctx: ModelContext,
@@ -1225,6 +1399,7 @@ async function probeTerminalChain(
     wslDistroName: env.WSL_DISTRO_NAME ?? null,
     tmuxActive: (env.TMUX ?? "").length > 0,
     herdrPaneId: env.HERDR_PANE_ID ?? null,
+    multiplexer: detectMultiplexer(env),
     ancestry: ancestryResult.names,
     ancestryUnavailable: ancestryResult.error,
     ...classification,
@@ -1562,13 +1737,45 @@ async function verifyGhosttyConfig(
   return { dataHandles: [handle] };
 }
 
+async function terminalReport(
+  args: Record<string, unknown>,
+  ctx: ModelContext,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const a = TerminalReportArgsSchema.parse(args);
+  const [probe, plan, pi, ghostty, xdg, verify] = await Promise.all([
+    ctx.readResource("terminal-probe"),
+    ctx.readResource("keymap-plan"),
+    ctx.readResource("pi-keybindings"),
+    ctx.readResource("ghostty-config"),
+    ctx.readResource("xdg-default-terminal"),
+    ctx.readResource("ghostty-verify"),
+  ]);
+  const markdown = renderTerminalReport(
+    a.apply === true,
+    probe,
+    plan,
+    pi,
+    ghostty,
+    xdg,
+    verify,
+  );
+  const handle = await ctx.createFileWriter(
+    "terminalReport",
+    "terminal-report-current",
+  ).writeText(markdown);
+  ctx.logger.info("Wrote terminal report ({bytes} bytes)", {
+    bytes: markdown.length,
+  });
+  return { dataHandles: [handle] };
+}
+
 /**
  * Agent-config model: inventory enrolled AI-tool configs and report drift
  * between the enrollment manifest, custom definitions, and on-disk state.
  */
 export const model = {
   type: "@maphew/agent-config",
-  version: "2026.10.16.1",
+  version: "2026.10.16.2",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -1587,6 +1794,12 @@ export const model = {
       toVersion: "2026.10.16.1",
       description:
         "Surface unreadable /proc ancestry in terminal-probe instead of reporting an empty chain; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.16.2",
+      description:
+        "Add terminalReport method and terminal-probe multiplexer field; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -1655,6 +1868,12 @@ export const model = {
       lifetime: "7d" as const,
       garbageCollection: 10,
     },
+    terminalReport: {
+      description: "Markdown terminal-keymap-setup run summary",
+      contentType: "text/markdown",
+      lifetime: "7d" as const,
+      garbageCollection: 10,
+    },
   },
   methods: {
     inventory: {
@@ -1710,6 +1929,12 @@ export const model = {
         "Run ghostty +show-config and check the ctrl+enter line disappeared and the font resolved",
       arguments: VerifyGhosttyConfigArgsSchema,
       execute: verifyGhosttyConfig,
+    },
+    terminalReport: {
+      description:
+        "Render a markdown summary of the latest terminal-keymap probe/plan/apply/verify run",
+      arguments: TerminalReportArgsSchema,
+      execute: terminalReport,
     },
   },
 };
