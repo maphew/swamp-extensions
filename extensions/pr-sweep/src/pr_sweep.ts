@@ -135,16 +135,49 @@ export const BUNDLED_SWEEPER_PROMPT = "prompts/pr-sweeper.md";
  * order is unit-testable without touching the filesystem.
  */
 export function resolveSweeperPromptPath(
-  repo: { sweeperPrompt?: string; swampRepoDir?: string },
-  opts: { bundled: string; exists: (path: string) => boolean },
+   repo: { sweeperPrompt?: string; swampRepoDir?: string },
+   opts: { bundled: string; exists: (path: string) => boolean },
 ): string {
-  if (repo.sweeperPrompt) return repo.sweeperPrompt;
-  if (repo.swampRepoDir) {
-    const legacy = `${repo.swampRepoDir}/.kilo/agents/pr-sweeper.md`;
-    if (opts.exists(legacy)) return legacy;
-  }
-  return opts.bundled;
+   if (repo.sweeperPrompt) return repo.sweeperPrompt;
+   if (repo.swampRepoDir) {
+     const legacy = `${repo.swampRepoDir}/.kilo/agents/pr-sweeper.md`;
+     if (opts.exists(legacy)) return legacy;
+   }
+   return opts.bundled;
 }
+
+async function checkToolAvailable(tool: string): Promise<void> {
+     try {
+       const cmd = new Deno.Command(tool, {
+         args: ["--version"],
+         stdout: "null",
+         stderr: "null",
+       });
+       const output = await cmd.output();
+
+       if (output.code === 0) {
+         return; // Tool is available
+       }
+
+       // Check if the error is due to the tool not being found.
+       const stderr = new TextDecoder().decode(output.stderr).toLowerCase();
+       if (output.code === 127 || stderr.includes("not found") || stderr.includes("no such file or directory")) {
+         throw new Error(`Required tool '${tool}' not found. Please install it and ensure it is in your PATH.`);
+       }
+
+       // If we get here, the tool exists but returned a non-zero exit code for --version (maybe it doesn't support that flag).
+       // We'll assume the tool is available.
+       return;
+     } catch (error) {
+       if (error instanceof Deno.errors.NotFound) {
+         throw new Error(`Required tool '${tool}' not found. Please install it and ensure it is in your PATH.`);
+       }
+       // If we get another error (like permission denied), we still consider the tool available? 
+       // Actually, if we get an error that is not NotFound, it means the tool was found but we couldn't run it (e.g., permission denied).
+       // We should still consider it available because the binary exists.
+       return;
+     }
+   }
 
 /** An open pull request as returned by `gh pr list`. */
 export type OpenPr = {
@@ -844,14 +877,26 @@ async function executeSweep(
   args: Repo,
   ctx: ModelContext,
 ): Promise<{ dataHandles: Array<{ name: string }> }> {
-  const repo: Repo = {
-    ...args,
-    agent: args.agent ?? "kilo",
-    mainBranch: args.mainBranch ?? "main",
-    swampRepoDir: args.swampRepoDir ?? ".",
-    resyncBehind: args.resyncBehind ?? true,
-    updateStrategy: args.updateStrategy ?? "merge",
-  };
+   const repo: Repo = {
+     ...args,
+     agent: args.agent ?? "kilo",
+     mainBranch: args.mainBranch ?? "main",
+     swampRepoDir: args.swampRepoDir ?? ".",
+     resyncBehind: args.resyncBehind ?? true,
+     updateStrategy: args.updateStrategy ?? "merge",
+   };
+   
+   // Preflight checks for external tools
+   await checkToolAvailable("gh");
+   await checkToolAvailable("git");
+   const agentBinaryMap: Record<Repo["agent"], string> = {
+     claude: "claude",
+     codex: "codex",
+     opencode: "opencode",
+     kilo: "kilo",
+   };
+   const agentBinary = agentBinaryMap[repo.agent];
+   await checkToolAvailable(agentBinary);
 
   ctx.logger.info("Listing open PRs from fork in upstream", {
     upstreamRepo: repo.upstreamRepo,
