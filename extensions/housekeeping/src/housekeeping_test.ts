@@ -8,18 +8,23 @@
 
 import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
-  countStatusFiles,
-  globToRegExp,
-  isExpired,
-  isOlderThan,
-  matchesGlob,
-  parseDfAvailableBytes,
-  parseForEachRef,
-  parseStashList,
-  parseStatusHeader,
-  parseWorktreeList,
-  renderReport,
-  versionToken,
+   countStatusFiles,
+   globToRegExp,
+   isExpired,
+   isOlderThan,
+   matchesGlob,
+   parseDfAvailableBytes,
+   parseForEachRef,
+   parseStashList,
+   parseStatusHeader,
+   parseWorktreeList,
+   renderReport,
+   versionToken,
+   checkGit,
+   checkWorktrees,
+   checkTemp,
+   checkBeads,
+   GlobalArgsSchema,
 } from "./housekeeping.ts";
 
 Deno.test("parseStatusHeader reads branch, upstream, ahead/behind", () => {
@@ -183,4 +188,133 @@ Deno.test("renderReport says clean when there are no findings", () => {
     findings: [],
   });
   assertEquals(md.includes("Nothing to report"), true);
+});
+
+Deno.test("checkGit works in a git repository", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    // Initialize a git repo
+    await new Deno.Command("git", { args: ["init"], cwd: tempDir }).output();
+    await new Deno.Command("git", { args: ["config", "user.name", "test"], cwd: tempDir }).output();
+    await new Deno.Command("git", { args: ["config", "user.email", "test@test.com"], cwd: tempDir }).output();
+    await Deno.writeTextFile(`${tempDir}/file.txt`, "content");
+    await new Deno.Command("git", { args: ["add", "file.txt"], cwd: tempDir }).output();
+    await new Deno.Command("git", { args: ["commit", "-m", "initial commit"], cwd: tempDir }).output();
+
+    const defaultBranch = "main";
+    const { report, findings } = await checkGit(tempDir, defaultBranch);
+
+    // Check that we are on the main branch
+    assertEquals(report.currentBranch, "main");
+    // No findings should be present for a clean repo
+    assertEquals(findings.length, 0);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+  Deno.test("checkGit throws when git is not available", async () => {
+    const tempDir = await Deno.makeTempDir();
+    try {
+      let error: Error | null = null;
+      try {
+        await checkGit(tempDir, "main");
+      } catch (err) {
+        error = err as Error;
+      }
+      assertEquals(error !== null, true);
+      if (error) {
+        assertEquals(error.message.includes("not a git repository (or git unavailable)"), true);
+      }
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  });
+
+Deno.test("checkWorktrees works in a git repository", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    await new Deno.Command("git", { args: ["init"], cwd: tempDir }).output();
+    await new Deno.Command("git", { args: ["config", "user.name", "test"], cwd: tempDir }).output();
+    await new Deno.Command("git", { args: ["config", "user.email", "test@test.com"], cwd: tempDir }).output();
+    await Deno.writeTextFile(`${tempDir}/file.txt`, "content");
+    await new Deno.Command("git", { args: ["add", "file.txt"], cwd: tempDir }).output();
+    await new Deno.Command("git", { args: ["commit", "-m", "initial commit"], cwd: tempDir }).output();
+
+    const { report, findings } = await checkWorktrees(tempDir);
+
+    // Check that we have at least the main worktree
+    assertEquals(report.total, 1);
+    assertEquals(report.stale.length, 0);
+    assertEquals(report.prunable.length, 0);
+    assertEquals(report.locked.length, 0);
+    assertEquals(report.detached.length, 0);
+    // No findings should be present for a clean repo
+    assertEquals(findings.length, 0);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("checkTemp returns a report", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const nowMs = Date.now();
+    const cfg = {
+      projectDir: ".",
+      defaultBranch: "main",
+      bdBin: "bd",
+      staleClaimDays: 7,
+      staleTempHours: 24,
+      tempGlobs: ["*.tmp"],
+      tempRoots: [],
+      processPatterns: [],
+      includeBeads: false,
+      includeTemp: true,
+    };
+    // We need to parse and validate the cfg
+    const validatedCfg = GlobalArgsSchema.parse(cfg);
+    const { report, findings } = await checkTemp(tempDir, nowMs, validatedCfg);
+
+    // We just check that we get a report back
+    assertEquals(report.entries.length, 0);
+    assertEquals(report.matched, 0);
+    assertEquals(report.stale, 0);
+    assertEquals(report.processes.length, 0);
+    // Findings may be present if there is temp debris, but in a fresh temp dir there should be none.
+    // We'll not assert on findings because it depends on the system temp dir.
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("checkBeads returns a report when .beads is absent", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const nowMs = Date.now();
+    const cfg = {
+      projectDir: ".",
+      defaultBranch: "main",
+      bdBin: "bd",
+      staleClaimDays: 7,
+      staleTempHours: 24,
+      tempGlobs: [],
+      tempRoots: [],
+      processPatterns: [],
+      includeBeads: false,
+      includeTemp: false,
+    };
+    const validatedCfg = GlobalArgsSchema.parse(cfg);
+    const { report, findings } = await checkBeads(tempDir, nowMs, validatedCfg, {
+      info: (msg, props) => console.info(msg, props),
+      warn: (msg, props) => console.warn(msg, props),
+    });
+
+    // When .beads is absent, the report should have present: false
+    assertEquals(report.present, false);
+    // No findings should be present
+    assertEquals(findings.length, 0);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
 });
