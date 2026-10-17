@@ -90,6 +90,13 @@ cannot be automated and stays a manual gate in
 The capability table is a planning hint, not a guarantee — re-probe rather than
 trusting it across OS/terminal versions.
 
+`probeTerminalChain` also attempts the `/proc` process-ancestry walk from the
+skill's Step 0, but Deno only permits reading `/proc/<pid>` under `--allow-all`,
+which swamp does not grant. When the walk is blocked the probe records
+`ancestryUnavailable` and its `reason` tells the operator to run the skill's
+shell ancestry probe by hand, rather than reporting an empty chain as if the
+process had no ancestors.
+
 ## Output
 
 - `inventory-current` — per-tool on-disk state vs enrollment and customisation

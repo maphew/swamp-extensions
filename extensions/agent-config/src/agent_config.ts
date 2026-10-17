@@ -610,6 +610,9 @@ const TerminalProbeSchema = z.object({
   ancestry: z.array(z.string()).describe(
     "Process names from innermost to outermost",
   ),
+  ancestryUnavailable: z.string().nullable().describe(
+    "Why /proc ancestry could not be read, or null when it was",
+  ),
   outerTerminal: z.string().describe("Classified outer terminal id"),
   outerSupportsModifiedEnter: z.boolean().describe(
     "Whether the outer terminal can report modified Enter distinctly",
@@ -898,18 +901,32 @@ export function classifyTerminal(
   };
 }
 
-/** Walk /proc parent links, returning process names innermost to outermost. */
+/** Process names walked from /proc plus any reason the walk was unavailable. */
+export type ProcAncestry = { names: string[]; error: string | null };
+
+/**
+ * Walk /proc parent links, returning process names innermost to outermost.
+ *
+ * Deno only permits reading `/proc/<pid>` under `--allow-all`, so a swamp-run
+ * extension normally cannot read it. The failure is returned as `error` rather
+ * than swallowed, so the probe can tell "no ancestors" from "cannot look" and
+ * tell the operator to run the shell ancestry probe by hand.
+ */
 export async function readProcAncestry(
   pid: number,
   max = 8,
-): Promise<string[]> {
+): Promise<ProcAncestry> {
   const names: string[] = [];
+  let error: string | null = null;
   let current: number | null = pid;
   for (let i = 0; i < max && current && current > 0; i++) {
     let comm: string;
     try {
       comm = (await Deno.readTextFile(`/proc/${current}/comm`)).trim();
-    } catch {
+    } catch (e) {
+      if (names.length === 0) {
+        error = e instanceof Error ? e.message : String(e);
+      }
       break;
     }
     names.push(comm);
@@ -926,7 +943,7 @@ export async function readProcAncestry(
     if (!Number.isFinite(ppid) || ppid <= 0) break;
     current = ppid;
   }
-  return names;
+  return { names, error };
 }
 
 /** Result of running a subprocess, or null when the binary is missing. */
@@ -1184,8 +1201,14 @@ async function probeTerminalChain(
 ): Promise<{ dataHandles: Array<{ name: string }> }> {
   const env = envObject();
   const os = Deno.build.os;
-  const ancestry = os === "windows" ? [] : await readProcAncestry(Deno.pid);
-  const classification = classifyTerminal(env, ancestry, os);
+  const ancestryResult = os === "windows"
+    ? { names: [] as string[], error: null }
+    : await readProcAncestry(Deno.pid);
+  const classification = classifyTerminal(env, ancestryResult.names, os);
+  if (ancestryResult.error) {
+    classification.reason +=
+      " /proc ancestry could not be read (Deno needs --allow-all for /proc/<pid>); run the skill's shell ancestry probe by hand.";
+  }
   ctx.logger.info(
     "Probed terminal chain: outer={outerTerminal}, platform={platform}, canReportModifiedEnter={supported}",
     {
@@ -1202,7 +1225,8 @@ async function probeTerminalChain(
     wslDistroName: env.WSL_DISTRO_NAME ?? null,
     tmuxActive: (env.TMUX ?? "").length > 0,
     herdrPaneId: env.HERDR_PANE_ID ?? null,
-    ancestry,
+    ancestry: ancestryResult.names,
+    ancestryUnavailable: ancestryResult.error,
     ...classification,
   });
   return { dataHandles: [handle] };
@@ -1544,7 +1568,7 @@ async function verifyGhosttyConfig(
  */
 export const model = {
   type: "@maphew/agent-config",
-  version: "2026.10.15.3",
+  version: "2026.10.16.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -1557,6 +1581,12 @@ export const model = {
       toVersion: "2026.10.15.3",
       description:
         "Add terminal-keymap-setup methods (probe/plan/apply/verify) and the terminalKeymap resource; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.16.1",
+      description:
+        "Surface unreadable /proc ancestry in terminal-probe instead of reporting an empty chain; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

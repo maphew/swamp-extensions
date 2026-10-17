@@ -17,6 +17,7 @@ import {
   parseCustomTools,
   parseEnrollment,
   planKeymapFromProbe,
+  readProcAncestry,
   resolveGhosttyConfigPath,
   resolvePiAgentDir,
   sha256Hex,
@@ -296,6 +297,18 @@ Deno.test("basename and dirname split POSIX and Windows paths", () => {
   assertEquals(basename("C:\\a\\b\\config"), "config");
   assertEquals(dirname("/a/b/config.ghostty"), "/a/b");
   assertEquals(dirname("C:\\a\\b\\config"), "C:\\a\\b");
+});
+
+Deno.test("readProcAncestry reports /proc availability without throwing", async () => {
+  const result = await readProcAncestry(Deno.pid);
+  assertEquals(Array.isArray(result.names), true);
+  // Deno only permits /proc/<pid> reads under --allow-all; when the walk is
+  // blocked it must say why instead of looking like a root process.
+  if (result.names.length === 0) {
+    assertEquals(typeof result.error, "string");
+  } else {
+    assertEquals(result.error, null);
+  }
 });
 
 // ---------- terminal-keymap method I/O ------------------------------------
