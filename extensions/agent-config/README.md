@@ -35,10 +35,17 @@ swamp model create @maphew/agent-config agent-config
 
 ## Methods
 
-| Method       | Purpose                                                       |
-| ------------ | ------------------------------------------------------------- |
-| `inventory`  | Per-tool on-disk state vs enrollment and customisation + report |
-| `checkDrift` | Drift findings only                                            |
+| Method                   | Purpose                                                                 |
+| ------------------------ | ----------------------------------------------------------------------- |
+| `inventory`              | Per-tool on-disk state vs enrollment and customisation + report        |
+| `checkDrift`             | Drift findings only                                                     |
+| `probeTerminalChain`     | Detect outer terminal, multiplexer, platform, modified-Enter capability |
+| `readDefaultTerminal`    | Read gsettings + xdg-terminal-exec default-terminal state (read-only)   |
+| `planKeymap`             | Turn a probe into the effective submit/newline chords and config lines  |
+| `applyPiKeybindings`     | Idempotently merge the planned bindings into pi's `keybindings.json`    |
+| `applyGhosttyConfig`     | Idempotently merge font-family + `ctrl+enter` unbind into Ghostty config |
+| `applyXdgDefaultTerminal`| Point xdg-terminal-exec at the desired desktop entry (Linux/GNOME)      |
+| `verifyGhosttyConfig`    | Check `ghostty +show-config` dropped the ctrl+enter binding and font     |
 
 ```bash
 # Full inventory plus markdown report
@@ -69,12 +76,31 @@ Global arguments (per model instance):
   delegating to swamp, listed so they are not reported as unmanaged (default
   `[]`)
 
+## Terminal keymap setup
+
+The `probeTerminalChain` → `planKeymap` → `apply*` → `verifyGhosttyConfig`
+methods implement the deterministic parts of the `terminal-keymap-setup` skill:
+probe the input chain (OS → outer terminal → multiplexer → pi), decide whether
+`Ctrl+Enter` can be reported distinctly (Kitty keyboard protocol) or whether the
+plan must fall back to `Alt+Enter`, then idempotently write the pi keybindings,
+the Ghostty config, and the xdg default terminal. The physical keystroke test
+cannot be automated and stays a manual gate in
+`workflow-terminal-keymap-setup.yaml`.
+
+The capability table is a planning hint, not a guarantee — re-probe rather than
+trusting it across OS/terminal versions.
+
 ## Output
 
 - `inventory-current` — per-tool on-disk state vs enrollment and customisation
 - `drift-current` — drift findings between enrollment, custom definitions, and
   disk
 - `report-current` — markdown report
+- `terminal-probe` — outer terminal / multiplexer / platform classification
+- `xdg-default-terminal-current` — current gsettings + xdg-terminal-exec state
+- `keymap-plan` — effective chords and config snippets
+- `pi-keybindings`, `ghostty-config`, `xdg-default-terminal` — apply results
+- `ghostty-verify` — parsed Ghostty config check
 
 ## License
 
