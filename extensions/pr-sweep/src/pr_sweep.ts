@@ -2,11 +2,26 @@
  * PR sweep — adversarially review, update, and merge open pull requests that a
  * fork contributes to an upstream GitHub repository.
  *
- * A single `sweep` method lists open PRs from the fork, hands them to a
- * headless agent (kilo by default) with a bundled sweeper prompt, parses each
- * PR's verdict from a durable per-PR file (falling back to stdout), re-fetches
- * the base branch and brings behind branches up to date, and writes queryable
- * per-PR and run-summary resources.
+ * Composable steps, orchestrated by whoever runs the sweep (Ceph, a foreman
+ * agent, a human, or a scheduled workflow). Each step reads its targets from
+ * written data when its argument is omitted, so steps chain without anyone
+ * passing handles around:
+ *
+ *   - `list`   — open PRs from the fork → `open-prs-current` + one `pr-spec`
+ *                resource per PR (the queue of work).
+ *   - `review` — one headless agent reviews a batch of PRs (default: every
+ *                listed PR) with the bundled sweeper prompt, then records each
+ *                verdict on its `pr` resource. Small batches only: the
+ *                orchestrator splits a long list into review batches.
+ *   - `sync`   — deterministic git branch-sync pass (+ bounded verify/top-up)
+ *                for listed or explicitly named PRs; no agent involved.
+ *   - `verdicts` / `summary` — read back what happened, as data.
+ *
+ * `sweep` remains as the monolithic convenience (list → one agent over all
+ * PRs → sync → summary) for scheduled workflows that want one call, but new
+ * orchestration should compose the steps. The orchestrator owns how PRs group
+ * into review batches and when sync runs; the behavior only does the work it
+ * is told to do.
  *
  * The sweeper prompt is bundled with the extension (`prompts/pr-sweeper.md`) so
  * the model is self-contained; a repo-local prompt can override it via
@@ -16,6 +31,14 @@
  */
 
 import { z } from "npm:zod@4";
+
+/** Headless agents a sweep can run. */
+export const AGENT_NAMES = ["claude", "codex", "opencode", "kilo"] as const;
+export type AgentName = typeof AGENT_NAMES[number];
+
+/** How a behind branch is brought up to date. */
+export const UPDATE_STRATEGIES = ["merge", "rebase"] as const;
+export type UpdateStrategy = typeof UPDATE_STRATEGIES[number];
 
 const RepoSchema = z.object({
   upstreamRepo: z.string().describe(
@@ -27,8 +50,9 @@ const RepoSchema = z.object({
   workdir: z.string().describe(
     "Local checkout directory for the upstream repo",
   ),
-  agent: z.enum(["claude", "codex", "opencode", "kilo"]).default("kilo")
-    .describe("Headless agent to run the sweep"),
+  agent: z.enum(AGENT_NAMES).default("kilo").describe(
+    "Headless agent to run the sweep",
+  ),
   mainBranch: z.string().default("main").describe(
     "Base branch to rebase and merge into",
   ),
@@ -41,7 +65,7 @@ const RepoSchema = z.object({
   resyncBehind: z.boolean().default(true).describe(
     "After the agent run, re-fetch the base branch and bring any behind PR branch up to date",
   ),
-  updateStrategy: z.enum(["merge", "rebase"]).default("merge").describe(
+  updateStrategy: z.enum(UPDATE_STRATEGIES).default("merge").describe(
     "How to update a behind branch: merge the base in (no force-push) or rebase onto it (force-push)",
   ),
 });
@@ -54,6 +78,9 @@ const SweepSummarySchema = z.object({
   mergedCount: z.number(),
   skippedCount: z.number(),
   failedCount: z.number(),
+  pendingCount: z.number().optional().describe(
+    "Listed PRs with no verdict yet",
+  ),
   report: z.string().optional(),
   truncated: z.boolean().optional(),
 });
@@ -61,7 +88,13 @@ const SweepSummarySchema = z.object({
 const PrResultSchema = z.object({
   number: z.number(),
   title: z.string(),
-  verdict: z.string(),
+  /** Set once a review batch has recorded this PR's outcome. */
+  verdict: z.string().default("pending"),
+  upstreamRepo: z.string().optional(),
+  forkRepo: z.string().optional(),
+  headRefName: z.string().optional(),
+  baseRefName: z.string().optional(),
+  reviewedAt: z.string().optional(),
   merged: z.boolean().optional(),
   reason: z.string().optional(),
   state: z.string().optional(),
@@ -74,47 +107,111 @@ type Repo = z.infer<typeof RepoSchema>;
 type SweepSummary = z.infer<typeof SweepSummarySchema>;
 type PrResult = z.infer<typeof PrResultSchema>;
 
-/** The binary and argument vector for one headless-agent invocation. */
-export type AgentInvocation = { binary: string; args: string[] };
+/**
+ * Per-run settings shared by every step. Defaults match the RepoSchema
+ * defaults so a step whose arguments omit them behaves identically.
+ */
+type RunSettings = {
+  agent: AgentName;
+  mainBranch: string;
+  swampRepoDir?: string;
+  sweeperPrompt?: string;
+  updateStrategy: UpdateStrategy;
+};
+
+/** What the branch-sync pass needs from a PR: its head and base branches. */
+export type SyncTarget = {
+  number: number;
+  headRefName: string;
+  baseRefName: string;
+};
 
 /**
- * Build the headless-agent command for one of the supported binaries. The
- * invocations mirror `.kilo/agents/run-task.sh` (the reference driver used in
- * swamp repos), so `agent` selects a real binary instead of silently running
- * kilo for every value. Claude/codex take the whole prompt positionally;
- * opencode takes the task as its argument and the sweeper contract as
- * `--system-prompt`; kilo gets the prompt after `--`.
+ * The fields the deterministic branch-sync pass needs. A composable step
+ * builds it from its own arguments plus the resolved workdir, so sync does not
+ * require a full monolithic `sweep` argument set.
  */
-export function buildAgentInvocation(
-  agent: Repo["agent"],
-  opts: { prompt: string; systemPrompt: string; workingDir: string },
-): AgentInvocation {
-  const full = opts.systemPrompt
-    ? `${opts.systemPrompt}\n\n${opts.prompt}`
-    : opts.prompt;
-  switch (agent) {
-    case "claude":
-      return {
-        binary: "claude",
-        args: ["-p", "--dangerously-skip-permissions", full],
-      };
-    case "codex":
-      return {
-        binary: "codex",
-        args: ["exec", "--dangerously-bypass-approvals-and-sandbox", full],
-      };
-    case "opencode":
-      return {
-        binary: "opencode",
-        args: [opts.prompt, `--system-prompt=${opts.systemPrompt}`],
-      };
-    case "kilo":
-    default:
-      return {
-        binary: "kilo",
-        args: ["run", "--auto", "--dir", opts.workingDir, "--", full],
-      };
+export type SyncRepo = {
+  upstreamRepo: string;
+  forkRepo: string;
+  workdir: string;
+  agent: AgentName;
+  mainBranch: string;
+  updateStrategy: UpdateStrategy;
+  swampRepoDir?: string;
+  sweeperPrompt?: string;
+};
+
+/** One listed PR carried in `open-prs-current`. */
+export type ListedPr = {
+  number: number;
+  title: string;
+  headRefName: string;
+  baseRefName: string;
+};
+
+/** The `open-prs` resource instance `open-prs-current`. */
+export const OpenPrsSchema = z.object({
+  upstreamRepo: z.string(),
+  forkRepo: z.string(),
+  listedAt: z.string(),
+  prs: z.array(
+    z.object({
+      number: z.number(),
+      title: z.string(),
+      headRefName: z.string(),
+      baseRefName: z.string(),
+    }),
+  ),
+  truncated: z.boolean(),
+});
+export type OpenPrsRecord = z.infer<typeof OpenPrsSchema>;
+
+/**
+ * Normalize step arguments into full per-run settings plus the repo pair.
+ * Shared by every composable step so their defaults cannot drift apart.
+ */
+export function normalizeRun(input: StepArgsInput): {
+  repo: { upstreamRepo: string; forkRepo: string };
+  settings: RunSettings;
+} {
+  const args = { ...input, batchSize: input.batchSize ?? 0 };
+  if (!args.upstreamRepo?.trim() || !args.forkRepo?.trim()) {
+    throw new Error(
+      "this step needs upstreamRepo and forkRepo (or run list first so open-prs-current can supply them)",
+    );
   }
+  return {
+    repo: {
+      upstreamRepo: args.upstreamRepo!.trim(),
+      forkRepo: args.forkRepo!.trim(),
+    },
+    settings: {
+      agent: args.agent ?? "kilo",
+      mainBranch: args.mainBranch ?? "main",
+      swampRepoDir: args.swampRepoDir,
+      sweeperPrompt: args.sweeperPrompt,
+      updateStrategy: args.updateStrategy ?? "merge",
+    },
+  };
+}
+
+/**
+ * Split a PR list into review batches of at most `batchSize` (0 = one batch,
+ * the whole list). An orchestrator uses this to decide how many agents to
+ * spawn; the behavior never decides for itself.
+ */
+export function planReviewBatches(
+  prs: Array<{ number: number }>,
+  batchSize: number,
+): number[][] {
+  if (prs.length === 0) return [];
+  if (batchSize <= 0) return [prs.map((pr) => pr.number)];
+  const batches: number[][] = [];
+  for (let i = 0; i < prs.length; i += batchSize) {
+    batches.push(prs.slice(i, i + batchSize).map((pr) => pr.number));
+  }
+  return batches;
 }
 
 /**
@@ -125,8 +222,29 @@ export function buildAgentInvocation(
  */
 export const GH_PR_LIST_LIMIT = 1000;
 
+/**
+ * Where the agent runner lives: `@maphew/agent-task`'s `run` method. pr-sweep
+ * depends on that extension (manifest `dependencies`) so the call is allowed.
+ */
+export const AGENT_TASK_TYPE = "@maphew/agent-task";
+export const AGENT_TASK_INSTANCE = "agent-task-queue";
+
 /** Path of the sweeper prompt bundled with the extension (see `additionalFiles`). */
 export const BUNDLED_SWEEPER_PROMPT = "prompts/pr-sweeper.md";
+
+/**
+ * How a review batch reports findings. The contract is written per PR, not
+ * once for the batch, so a batch's results always land on the machine-readable
+ * line shape regardless of how many PRs one agent handled.
+ */
+export function batchContractInstruction(batch: number[]): string {
+  return [
+    "Batch scope (required).",
+    `This review batch covers exactly these ${batch.length} pull request(s): ${
+      batch.map((n) => `#${n}`).join(", ")
+    }. Report one verdict line per PR in the batch — no more, no less — even when several PRs share a finding.`,
+  ].join("\n");
+}
 
 /**
  * Choose the sweeper prompt file. An explicit `sweeperPrompt` wins; else a
@@ -234,14 +352,46 @@ async function listOpenPrs(
   };
 }
 
-type AgentRun = { stdout: string; verdictFileText: string };
+type AgentRun = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  verdictFileText: string;
+};
 
+/**
+ * Compose the review prompt for one batch: what to sweep, which PRs this batch
+ * covers, how to update branches, and where to write the durable verdict file.
+ * Pure, so the wording is testable without running an agent.
+ */
+export function buildReviewPrompt(
+  repo: { upstreamRepo: string; forkRepo: string; mainBranch: string },
+  prs: Array<{ number: number; title: string }>,
+  opts: { updateStrategy: UpdateStrategy; verdictPath: string },
+): string {
+  return `Sweep the open pull requests listed below for upstream repo ${repo.upstreamRepo} from fork ${repo.forkRepo}. Base branch: ${repo.mainBranch}.\n\n` +
+    `${batchContractInstruction(prs.map((pr) => pr.number))}\n\n` +
+    `${updateStrategyInstruction(opts.updateStrategy)}\n\n` +
+    prs.map((pr) => `- PR #${pr.number}: ${pr.title}`).join("\n") +
+    `\n\n${verdictFileInstruction(opts.verdictPath)}\n`;
+}
+
+/**
+ * Run one review batch through `@maphew/agent-task`'s `run` method, which owns
+ * how a headless agent is launched. pr-sweep owns the prompt, the batch and
+ * the durable verdict file; it does not own the invocation.
+ *
+ * A non-zero exit is reported to the caller but does not throw: a review that
+ * timed out can still have written verdicts for the PRs it did finish, and
+ * those are what the caller records.
+ */
 async function runAgent(
-  ctx: {
-    logger: { info: (msg: string) => void; error: (msg: string) => void };
-    signal: AbortSignal;
+  ctx: ModelContext,
+  repo: Pick<Repo, "upstreamRepo" | "forkRepo" | "workdir"> & {
+    agent: RunSettings["agent"];
+    mainBranch: string;
+    updateStrategy: RunSettings["updateStrategy"];
   },
-  repo: Repo,
   prs: Array<{ number: number; title: string }>,
   systemPromptPath: string,
 ): Promise<AgentRun> {
@@ -251,35 +401,42 @@ async function runAgent(
   });
   const verdictPath = `${verdictDir}/verdicts.txt`;
   try {
-    const taskPrompt =
-      `Sweep the open pull requests listed below for upstream repo ${repo.upstreamRepo} from fork ${repo.forkRepo}. Base branch: ${repo.mainBranch}.\n\n` +
-      `${updateStrategyInstruction(repo.updateStrategy)}\n\n` +
-      prs.map((pr) => `- PR #${pr.number}: ${pr.title}`).join("\n") +
-      `\n\n${verdictFileInstruction(verdictPath)}\n`;
-
-    const { binary, args } = buildAgentInvocation(repo.agent, {
-      prompt: taskPrompt,
-      systemPrompt,
-      workingDir: repo.workdir,
+    const taskPrompt = buildReviewPrompt(repo, prs, {
+      updateStrategy: repo.updateStrategy,
+      verdictPath,
     });
 
-    ctx.logger.info(`Running ${binary} agent for ${prs.length} PR(s)`);
-
-    // swamp-quality-ignore deno-command: the whole point is to run the agent.
-    const command = new Deno.Command(binary, {
-      args,
-      cwd: repo.workdir,
-      stdout: "piped",
-      stderr: "piped",
-      signal: ctx.signal,
+    if (!ctx.runModel) {
+      throw new Error(
+        "review: cross-behavior calls are unavailable in this context, so the agent runner (@maphew/agent-task's `run`) cannot be reached",
+      );
+    }
+    const result = await ctx.runModel({
+      modelType: AGENT_TASK_TYPE,
+      name: AGENT_TASK_INSTANCE,
+      method: "run",
+      arguments: {
+        prompt: taskPrompt,
+        systemPrompt,
+        workdir: repo.workdir,
+        agent: repo.agent,
+      },
     });
+    if (!result.ok) {
+      throw new Error(`agent-task run failed: ${result.error.message}`);
+    }
 
-    const output = await command.output();
-    const stdout = new TextDecoder().decode(output.stdout);
-    const stderr = new TextDecoder().decode(output.stderr);
-
-    if (output.code !== 0) {
-      ctx.logger.error(`Agent exited with code ${output.code}: ${stderr}`);
+    // The run's outcome lives on the runner's own data, not in this process.
+    const runRecords = await ctx.readModelData?.(
+      AGENT_TASK_INSTANCE,
+      "run",
+    ) ?? [];
+    const latest = runRecords[runRecords.length - 1]?.attributes ?? {};
+    const stdout = typeof latest.stdout === "string" ? latest.stdout : "";
+    const stderr = typeof latest.stderr === "string" ? latest.stderr : "";
+    const exitCode = typeof latest.exitCode === "number" ? latest.exitCode : 1;
+    if (exitCode !== 0) {
+      ctx.logger.error(`Review agent exited with code ${exitCode}: ${stderr}`);
     }
 
     let verdictFileText = "";
@@ -289,7 +446,7 @@ async function runAgent(
       // Agent wrote nothing to the durable file; stdout parsing still applies.
     }
 
-    return { stdout, verdictFileText };
+    return { stdout, stderr, exitCode, verdictFileText };
   } finally {
     try {
       await Deno.remove(verdictDir, { recursive: true });
@@ -442,7 +599,27 @@ export function parseReportForVerdicts(
 type ModelContext = {
   signal: AbortSignal;
   globalArgs: Record<string, never>;
+  definition: { id: string; name: string; version: string };
   extensionFile: (path: string) => string;
+  /** Present when swamp runs methods in-process; steps degrade without it. */
+  readModelData?: (
+    modelName: string,
+    specName: string,
+  ) => Promise<Array<{ name?: string; attributes?: Record<string, unknown> }>>;
+  queryData?: (
+    predicate: string,
+    select?: string,
+  ) => Promise<DataRecord[] | unknown[]>;
+  /** Call another extension's behavior type (declared under `dependencies`). */
+  runModel?: (options: {
+    modelType: string;
+    name?: string;
+    method: string;
+    arguments?: Record<string, unknown>;
+  }) => Promise<
+    | { ok: true; resources: Array<{ name: string }> }
+    | { ok: false; error: { message: string; stack?: string } }
+  >;
   writeResource: (
     specName: string,
     name: string,
@@ -459,6 +636,14 @@ type ModelContext = {
     error: (msg: string, props?: Record<string, unknown>) => void;
   };
 };
+
+/** One durable data record as `readModelData`/`queryData` hand it back. */
+export interface DataRecord {
+  name?: string;
+  specName?: string;
+  modelName?: string;
+  attributes?: Record<string, unknown>;
+}
 
 type GitResult = { ok: boolean; code: number; stdout: string; stderr: string };
 
@@ -508,7 +693,7 @@ export type PrSyncStatus =
 
 /** Instruction describing the configured merge/rebase update contract. */
 export function updateStrategyInstruction(
-  strategy: "merge" | "rebase",
+  strategy: UpdateStrategy,
 ): string {
   return strategy === "merge"
     ? "Update strategy: merge. Bring each PR branch up to date by merging the base branch into it; do not rebase, and never force-push."
@@ -610,8 +795,8 @@ async function rebaseOnto(
  * verifySyncedPrs for a per-PR fresh check and a bounded top-up.
  */
 export async function resyncBehindPrs(
-  repo: Repo,
-  prs: OpenPr[],
+  repo: SyncRepo,
+  prs: SyncTarget[],
   stateByNumber: Map<number, PrState>,
   ctx: ModelContext,
 ): Promise<Map<number, { status: PrSyncStatus; detail?: string }>> {
@@ -818,8 +1003,8 @@ export function combineVerifyResult(
  * perfect freshness is unattainable while the upstream keeps merging.
  */
 export async function verifySyncedPrs(
-  repo: Repo,
-  prs: OpenPr[],
+  repo: SyncRepo,
+  prs: SyncTarget[],
   stateByNumber: Map<number, PrState>,
   prior: Map<number, { status: PrSyncStatus; detail?: string }>,
   ctx: ModelContext,
@@ -840,28 +1025,211 @@ export async function verifySyncedPrs(
   return final;
 }
 
-async function executeSweep(
-  args: Repo,
+// ---------- composable steps ------------------------------------------------
+
+/** Arguments shared by every composable step (repo pair + per-run settings). */
+const StepArgsBaseSchema = z.object({
+  workdir: z.string().optional().describe(
+    "Local checkout directory for the upstream repo. Omit to resolve it from pr-sweep-config's registered pairs.",
+  ),
+  upstreamRepo: z.string().optional().describe(
+    "Upstream GitHub repo as owner/name. Omit to use the newest open-prs-current.",
+  ),
+  forkRepo: z.string().optional().describe(
+    "Fork GitHub repo as owner/name. Omit to use the newest open-prs-current.",
+  ),
+  agent: z.enum(AGENT_NAMES).default("kilo").describe(
+    "Headless agent for review batches",
+  ),
+  mainBranch: z.string().default("main").describe(
+    "Base branch to rebase and merge into",
+  ),
+  swampRepoDir: z.string().optional().describe(
+    "Path to the swamp repo that owns this workflow; only for the legacy prompt override.",
+  ),
+  sweeperPrompt: z.string().optional().describe(
+    "Absolute path to a custom sweeper prompt file.",
+  ),
+  updateStrategy: z.enum(UPDATE_STRATEGIES).default("merge").describe(
+    "How to update a behind branch: merge the base in (no force-push) or rebase onto it (force-push)",
+  ),
+  batchSize: z.number().int().min(0).default(0).describe(
+    "list only: group PRs into review batches of at most this many (0 = one batch, the whole list) and report the grouping for the orchestrator",
+  ),
+});
+/** Inference-time input shape (defaults optional); swamp parses at runtime. */
+type StepArgsInput = z.input<typeof StepArgsBaseSchema>;
+
+/** Workdir of the local checkout, resolved from config or an explicit argument. */
+async function resolveWorkdir(
   ctx: ModelContext,
-): Promise<{ dataHandles: Array<{ name: string }> }> {
-  const repo: Repo = {
+  repoPair: { upstreamRepo: string; forkRepo: string },
+  explicit?: string,
+): Promise<string> {
+  if (explicit?.trim()) return explicit.trim();
+  if (!ctx.queryData) {
+    throw new Error(
+      `no workdir for ${repoPair.upstreamRepo} / ${repoPair.forkRepo}: pass workdir= or register the pair in pr-sweep-config`,
+    );
+  }
+  try {
+    const rows = await ctx.queryData(
+      'modelName == "pr-sweep-config" && specName == "config"',
+    );
+    for (const raw of rows as Array<Record<string, unknown>>) {
+      const attrs = (raw.attributes ?? {}) as Record<string, unknown>;
+      const pairs = (attrs.repoPairs ?? []) as Array<Record<string, unknown>>;
+      const match = pairs.find((p) =>
+        p.upstreamRepo === repoPair.upstreamRepo &&
+        p.forkRepo === repoPair.forkRepo
+      );
+      if (typeof match?.workdir === "string" && match.workdir.trim()) {
+        return match.workdir;
+      }
+    }
+  } catch (err) {
+    ctx.logger.warn("Could not query pr-sweep-config for the workdir", {
+      error: String(err),
+    });
+  }
+  throw new Error(
+    `no workdir for ${repoPair.upstreamRepo} / ${repoPair.forkRepo}: pass workdir= or register the pair in pr-sweep-config`,
+  );
+}
+
+/** Durably read the newest `open-prs-current`, or null when absent/unparsable. */
+async function readOpenPrs(ctx: ModelContext): Promise<OpenPrsRecord | null> {
+  if (!ctx.readModelData) {
+    ctx.logger.warn(
+      "ceph steps: readModelData unavailable; open-prs-current unreadable",
+    );
+    return null;
+  }
+  try {
+    const rows = await ctx.readModelData(ctx.definition.name, "open-prs");
+    const record = rows.find((r) => r.name === OPEN_PRS_INSTANCE);
+    if (!record?.attributes) return null;
+    const parsed = OpenPrsSchema.safeParse(record.attributes);
+    return parsed.success ? parsed.data : null;
+  } catch (err) {
+    ctx.logger.warn("Could not read open-prs-current", { error: String(err) });
+    return null;
+  }
+}
+
+/**
+ * Fill in the repo pair from `open-prs-current` when a step's arguments omit
+ * it, so a step run right after `list` needs no wiring. Explicit arguments
+ * always win.
+ */
+export function withQueueRepoPair(
+  args: StepArgsInput,
+  current: OpenPrsRecord | null,
+): StepArgsInput {
+  if (args.upstreamRepo?.trim() && args.forkRepo?.trim()) return args;
+  if (!current) return args;
+  return {
     ...args,
-    agent: args.agent ?? "kilo",
-    mainBranch: args.mainBranch ?? "main",
-    swampRepoDir: args.swampRepoDir ?? ".",
-    resyncBehind: args.resyncBehind ?? true,
-    updateStrategy: args.updateStrategy ?? "merge",
+    upstreamRepo: args.upstreamRepo?.trim() || current.upstreamRepo,
+    forkRepo: args.forkRepo?.trim() || current.forkRepo,
   };
+}
 
-  ctx.logger.info("Listing open PRs from fork in upstream", {
-    upstreamRepo: repo.upstreamRepo,
-    forkRepo: repo.forkRepo,
-  });
+/** The instance name one PR's `pr` resource is written under. */
+export function prInstanceName(upstreamRepo: string, number: number): string {
+  return `${upstreamRepo.replace(/\//g, "-")}-${number}`;
+}
 
-  let prs: OpenPr[];
+/** Read back one PR's recorded result, or null when never written. */
+async function readPrResource(
+  ctx: ModelContext,
+  name: string,
+): Promise<PrResult | null> {
+  if (!ctx.readModelData) return null;
+  try {
+    const rows = await ctx.readModelData(ctx.definition.name, "pr");
+    const record = rows.find((r) => r.name === name);
+    if (!record?.attributes) return null;
+    const parsed = PrResultSchema.safeParse(record.attributes);
+    return parsed.success ? parsed.data : null;
+  } catch (err) {
+    ctx.logger.warn(`Could not read pr resource ${name}`, {
+      error: String(err),
+    });
+    return null;
+  }
+}
+
+/** Merge fresh verdict/state/sync fields onto a PR's existing record. */
+function mergePrFields(
+  prior: PrResult | null,
+  listed: ListedPr | null,
+  patch: Partial<PrResult>,
+): PrResult {
+  const base: PrResult = prior ?? {
+    number: listed?.number ?? patch.number ?? 0,
+    title: listed?.title ?? patch.title ?? "",
+    verdict: "pending",
+  };
+  return {
+    ...base,
+    ...(listed
+      ? {
+        headRefName: listed.headRefName,
+        baseRefName: listed.baseRefName,
+      }
+      : {}),
+    ...patch,
+  };
+}
+
+/** Count verdicts across the given records the way a summary reports them. */
+export function tallyPrs(records: Array<PrResult>): {
+  mergedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  pendingCount: number;
+} {
+  let mergedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  let pendingCount = 0;
+  for (const rec of records) {
+    if (rec.merged || rec.verdict === "merged") mergedCount++;
+    else if (rec.verdict === "skipped" || rec.verdict === "no-op") {
+      skippedCount++;
+    } else if (rec.verdict === "conflict" || rec.verdict === "unresolvable") {
+      failedCount++;
+    } else if (rec.verdict === "pending" || rec.verdict === "unknown") {
+      pendingCount++;
+    }
+  }
+  return { mergedCount, skippedCount, failedCount, pendingCount };
+}
+
+const OPEN_PRS_INSTANCE = "open-prs-current";
+
+async function stepList(
+  args: StepArgsInput & { workdir?: string },
+  ctx: ModelContext,
+): Promise<{
+  upstreamRepo: string;
+  forkRepo: string;
+  prs: ListedPr[];
+  batches: number[][];
+  truncated: boolean;
+  dataHandles: Array<{ name: string }>;
+}> {
+  const { repo, settings } = normalizeRun(args);
+  ctx.logger.info("list: open PRs from fork in upstream", repo);
+
+  let open: OpenPr[];
   let truncated = false;
   try {
-    ({ prs, truncated } = await listOpenPrs(repo.upstreamRepo, repo.forkRepo));
+    ({ prs: open, truncated } = await listOpenPrs(
+      repo.upstreamRepo,
+      repo.forkRepo,
+    ));
   } catch (err) {
     ctx.logger.error("Failed to list PRs", { error: String(err) });
     throw err;
@@ -873,48 +1241,114 @@ async function executeSweep(
     );
   }
 
-  if (prs.length === 0) {
-    ctx.logger.info("No open PRs from fork; nothing to sweep");
-    const handle = await ctx.writeResource("sweep", "noop", {
-      upstreamRepo: repo.upstreamRepo,
-      forkRepo: repo.forkRepo,
-      sweptAt: new Date().toISOString(),
-      prCount: 0,
-      mergedCount: 0,
-      skippedCount: 0,
-      failedCount: 0,
-      report: "No open PRs from fork; nothing to sweep.",
-      truncated,
-    });
-    return { dataHandles: [handle] };
+  const prs: ListedPr[] = open.map((pr) => ({
+    number: pr.number,
+    title: pr.title,
+    headRefName: pr.headRefName,
+    baseRefName: pr.baseRefName || settings.mainBranch,
+  }));
+
+  const record: OpenPrsRecord = {
+    upstreamRepo: repo.upstreamRepo,
+    forkRepo: repo.forkRepo,
+    listedAt: new Date().toISOString(),
+    prs,
+    truncated,
+  };
+  const handles: Array<{ name: string }> = [];
+  handles.push(await ctx.writeResource("open-prs", OPEN_PRS_INSTANCE, record));
+
+  // Seed/refresh one `pr` resource per listed PR so the queue is queryable
+  // before any review happens; existing verdicts and sync state are preserved.
+  for (const listed of prs) {
+    const name = prInstanceName(repo.upstreamRepo, listed.number);
+    const prior = await readPrResource(ctx, name);
+    handles.push(
+      await ctx.writeResource("pr", name, mergePrFields(prior, listed, {})),
+    );
   }
 
-  ctx.logger.info(`Found ${prs.length} open PR(s) from fork`);
+  const batchSize = args.batchSize ?? 0;
+  const batches = planReviewBatches(prs, batchSize);
+  ctx.logger.info(
+    `list: ${prs.length} open PR(s) in ${batches.length} review batch(es)`,
+    { truncated },
+  );
+  return { ...repo, prs, batches, truncated, dataHandles: handles };
+}
 
-  const systemPromptPath = resolveSweeperPromptPath(repo, {
-    bundled: ctx.extensionFile(BUNDLED_SWEEPER_PROMPT),
-    exists: (path) => {
-      try {
-        return Deno.statSync(path).isFile;
-      } catch {
-        return false;
-      }
+async function stepReview(
+  args: StepArgsInput & {
+    numbers?: number[];
+    workdir?: string;
+    resyncBehind?: boolean;
+  },
+  ctx: ModelContext,
+): Promise<{
+  reviewed: number[];
+  verdicts: Record<string, string>;
+  unreviewed: number[];
+  dataHandles: Array<{ name: string }>;
+}> {
+  const current = await readOpenPrs(ctx);
+  const { repo, settings } = normalizeRun(
+    withQueueRepoPair(args, current),
+  );
+  const byNumber = new Map<number, ListedPr>(
+    (current?.prs ?? []).map((pr) => [pr.number, pr]),
+  );
+
+  const requested = args.numbers && args.numbers.length > 0
+    ? args.numbers
+    : [...byNumber.keys()];
+  if (requested.length === 0) {
+    throw new Error(
+      "review: no PR numbers given and open-prs-current lists none — run list first",
+    );
+  }
+  const unknown = requested.filter((n) => !byNumber.has(n));
+  if (unknown.length > 0) {
+    throw new Error(
+      `review: PR(s) ${
+        unknown.join(", ")
+      } are not in open-prs-current — run list again or pass the right numbers`,
+    );
+  }
+
+  const workdir = await resolveWorkdir(ctx, repo, args.workdir);
+  const systemPromptPath = resolveSweeperPromptPath(
+    {
+      swampRepoDir: settings.swampRepoDir,
+      sweeperPrompt: settings.sweeperPrompt,
+    } as Repo,
+    {
+      bundled: ctx.extensionFile(BUNDLED_SWEEPER_PROMPT),
+      exists: (path) => {
+        try {
+          return Deno.statSync(path).isFile;
+        } catch {
+          return false;
+        }
+      },
     },
-  });
-  let run: AgentRun;
-  try {
-    run = await runAgent(ctx, repo, prs, systemPromptPath);
-  } catch (err) {
-    ctx.logger.error("Agent run failed", { error: String(err) });
-    throw err;
-  }
-  const report = run.stdout;
+  );
 
-  // The durable per-PR file is authoritative: it is written as each PR
-  // finishes, so it survives truncation of the agent's closing message, which
-  // is where the stdout verdict block lives. stdout is the fallback.
+  const batch = requested.map((n) => byNumber.get(n)!);
+  const run = await runAgent(
+    ctx,
+    {
+      ...repo,
+      workdir,
+      agent: settings.agent,
+      mainBranch: settings.mainBranch,
+      updateStrategy: settings.updateStrategy,
+    },
+    batch,
+    systemPromptPath,
+  );
+
   const verdicts = mergeVerdicts(
-    parseReportForVerdicts(report),
+    parseReportForVerdicts(run.stdout),
     parseReportForVerdicts(run.verdictFileText),
   );
   if (run.verdictFileText.trim() === "") {
@@ -923,17 +1357,15 @@ async function executeSweep(
       { parsedVerdicts: verdicts.size },
     );
   }
-  if (verdicts.size === 0 && prs.length > 0) {
+  if (verdicts.size === 0) {
     ctx.logger.warn(
-      "No per-PR verdicts parsed from the agent run; PRs will record verdict=unknown",
-      { prCount: prs.length },
+      "No per-PR verdicts parsed from the review run; PRs will record verdict=unknown",
+      { prCount: batch.length },
     );
   }
 
-  // Read every PR's post-agent state before the branch-sync pass: a merged
-  // PR's branch is usually deleted, so it must not be pushed.
   const stateByNumber = new Map<number, PrState>();
-  for (const pr of prs) {
+  for (const pr of batch) {
     try {
       stateByNumber.set(
         pr.number,
@@ -947,93 +1379,271 @@ async function executeSweep(
     }
   }
 
+  // The review agent already brings its PRs up to date as part of the sweep
+  // procedure; the deterministic sync pass afterwards catches drift. It is
+  // opt-out for callers that sync on their own schedule.
   let syncResults = new Map<
     number,
     { status: PrSyncStatus; detail?: string }
   >();
-  if (repo.resyncBehind) {
+  if (args.resyncBehind !== false) {
     try {
-      const synced = await resyncBehindPrs(repo, prs, stateByNumber, ctx);
+      const syncRepo: SyncRepo = { ...repo, workdir, ...settings };
+      const synced = await resyncBehindPrs(syncRepo, batch, stateByNumber, ctx);
       syncResults = await verifySyncedPrs(
-        repo,
-        prs,
+        syncRepo,
+        batch,
         stateByNumber,
         synced,
         ctx,
       );
-      const updated = [...syncResults.values()].filter((r) =>
-        r.status === "updated"
-      ).length;
-      const drifted = [...syncResults.values()].filter((r) =>
-        r.detail === TOPPED_UP_DETAIL
-      ).length;
-      ctx.logger.info(
-        `Branch sync pass updated ${updated} PR(s) (${repo.updateStrategy})` +
-          (drifted > 0 ? `, ${drifted} topped up after base moved` : ""),
-      );
     } catch (err) {
-      ctx.logger.error("Branch sync pass failed", { error: String(err) });
+      ctx.logger.error("Branch sync pass after review failed", {
+        error: String(err),
+      });
     }
   }
 
   const now = new Date().toISOString();
-  let mergedCount = 0;
-  let skippedCount = 0;
-  let failedCount = 0;
-
-  const prHandles: Array<{ name: string }> = [];
-  const instancePrefix = repo.upstreamRepo.replace(/\//g, "-");
-  for (const pr of prs) {
+  const handles: Array<{ name: string }> = [];
+  const verdictByName: Record<string, string> = {};
+  for (const pr of batch) {
     const verdictInfo = verdicts.get(pr.number) ?? { verdict: "unknown" };
     const state = stateByNumber.get(pr.number) ?? { ...UNKNOWN_PR_STATE };
-
-    const merged = state.merged || verdictInfo.verdict === "merged";
-    if (merged) mergedCount++;
-    else if (
-      verdictInfo.verdict === "skipped" || verdictInfo.verdict === "no-op"
-    ) skippedCount++;
-    else if (
-      verdictInfo.verdict === "conflict" ||
-      verdictInfo.verdict === "unresolvable"
-    ) failedCount++;
-
     const sync = syncResults.get(pr.number);
-    const handle = await ctx.writeResource(
-      "pr",
-      `${instancePrefix}-${pr.number}`,
-      {
-        number: pr.number,
-        title: pr.title,
-        verdict: verdictInfo.verdict,
-        merged,
-        reason: verdictInfo.reason,
-        state: state.state,
-        mergeStateStatus: state.mergeStateStatus,
-        syncStatus: sync?.status,
-        syncDetail: sync?.detail,
-      },
+    const name = prInstanceName(repo.upstreamRepo, pr.number);
+    const prior = await readPrResource(ctx, name);
+    verdictByName[String(pr.number)] = verdictInfo.verdict;
+    handles.push(
+      await ctx.writeResource(
+        "pr",
+        name,
+        mergePrFields(prior, pr, {
+          number: pr.number,
+          title: pr.title,
+          upstreamRepo: repo.upstreamRepo,
+          forkRepo: repo.forkRepo,
+          verdict: verdictInfo.verdict,
+          reason: verdictInfo.reason,
+          merged: state.merged || verdictInfo.verdict === "merged",
+          state: state.state,
+          mergeStateStatus: state.mergeStateStatus,
+          reviewedAt: now,
+          syncStatus: sync?.status,
+          syncDetail: sync?.detail,
+        }),
+      ),
     );
-    prHandles.push(handle);
   }
 
-  const summaryHandle = await ctx.writeResource("sweep", "summary", {
+  const unreviewed = [...byNumber.keys()].filter((n) => !requested.includes(n));
+  ctx.logger.info(
+    `review: ${batch.length} PR(s) reviewed; ${unreviewed.length} still pending`,
+    { verdicts: verdictByName },
+  );
+  return {
+    reviewed: requested,
+    verdicts: verdictByName,
+    unreviewed,
+    dataHandles: handles,
+  };
+}
+
+async function stepSync(
+  args: StepArgsInput & { numbers?: number[]; workdir?: string },
+  ctx: ModelContext,
+): Promise<{
+  synced: Record<string, string>;
+  dataHandles: Array<{ name: string }>;
+}> {
+  const current = await readOpenPrs(ctx);
+  const { repo, settings } = normalizeRun(
+    withQueueRepoPair(args, current),
+  );
+  const byNumber = new Map<number, ListedPr>(
+    (current?.prs ?? []).map((pr) => [pr.number, pr]),
+  );
+  const requested = args.numbers && args.numbers.length > 0
+    ? args.numbers
+    : [...byNumber.keys()];
+  if (requested.length === 0) {
+    throw new Error(
+      "sync: no PR numbers given and open-prs-current lists none — run list first",
+    );
+  }
+
+  const workdir = await resolveWorkdir(ctx, repo, args.workdir);
+  const batch = requested
+    .map((n) => byNumber.get(n))
+    .filter((pr): pr is ListedPr => pr !== undefined);
+  const stale = requested.filter((n) => !byNumber.has(n));
+  if (stale.length > 0) {
+    ctx.logger.warn(
+      "sync: PR(s) not in open-prs-current are skipped (branch names unknown)",
+      { stale },
+    );
+  }
+
+  const stateByNumber = new Map<number, PrState>();
+  for (const pr of batch) {
+    stateByNumber.set(
+      pr.number,
+      await queryPrState(repo.upstreamRepo, pr.number, ctx.logger),
+    );
+  }
+
+  const syncRepo: SyncRepo = { ...repo, workdir, ...settings };
+  const synced = await resyncBehindPrs(syncRepo, batch, stateByNumber, ctx);
+  const finalResults = await verifySyncedPrs(
+    syncRepo,
+    batch,
+    stateByNumber,
+    synced,
+    ctx,
+  );
+
+  const handles: Array<{ name: string }> = [];
+  const statuses: Record<string, string> = {};
+  for (const pr of batch) {
+    const res = finalResults.get(pr.number);
+    if (!res) continue;
+    statuses[String(pr.number)] = res.status;
+    const name = prInstanceName(repo.upstreamRepo, pr.number);
+    const prior = await readPrResource(ctx, name);
+    handles.push(
+      await ctx.writeResource(
+        "pr",
+        name,
+        mergePrFields(prior, pr, {
+          upstreamRepo: repo.upstreamRepo,
+          forkRepo: repo.forkRepo,
+          syncStatus: res.status,
+          syncDetail: res.detail,
+        }),
+      ),
+    );
+  }
+  ctx.logger.info(`sync: ${batch.length} PR(s) checked`, { statuses });
+  return { synced: statuses, dataHandles: handles };
+}
+
+async function stepVerdicts(
+  args: StepArgsInput,
+  ctx: ModelContext,
+): Promise<{ results: PrResult[]; dataHandles: Array<{ name: string }> }> {
+  const current = await readOpenPrs(ctx);
+  const { repo } = normalizeRun(withQueueRepoPair(args, current));
+  const results: PrResult[] = [];
+  for (const listed of current?.prs ?? []) {
+    const prior = await readPrResource(
+      ctx,
+      prInstanceName(repo.upstreamRepo, listed.number),
+    );
+    results.push(prior ?? mergePrFields(null, listed, {}));
+  }
+  ctx.logger.info("verdicts: {result}", {
+    result: JSON.stringify(
+      results.map((r) => ({ pr: r.number, verdict: r.verdict })),
+    ),
+  });
+  return { results, dataHandles: [] };
+}
+
+async function stepSummary(
+  args: StepArgsInput,
+  ctx: ModelContext,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const current = await readOpenPrs(ctx);
+  const { repo } = normalizeRun(withQueueRepoPair(args, current));
+  const records: PrResult[] = [];
+  for (const listed of current?.prs ?? []) {
+    const prior = await readPrResource(
+      ctx,
+      prInstanceName(repo.upstreamRepo, listed.number),
+    );
+    records.push(prior ?? mergePrFields(null, listed, {}));
+  }
+  const tally = tallyPrs(records);
+  const reportLines = [
+    `# PR sweep summary — ${repo.upstreamRepo}`,
+    "",
+    `Listed: ${records.length} · Merged: ${tally.mergedCount} · Skipped: ${tally.skippedCount} · Failed: ${tally.failedCount} · Pending: ${tally.pendingCount}`,
+    "",
+    "| PR | Verdict | State | Sync | Note |",
+    "| -- | ------- | ----- | ---- | ---- |",
+    ...records.map((r) =>
+      `| #${r.number} | ${r.verdict} | ${r.state ?? "?"} | ${
+        r.syncStatus ?? "-"
+      } | ${(r.reason ?? "").slice(0, 80)} |`
+    ),
+  ];
+  const handle = await ctx.writeResource("sweep", "summary", {
     upstreamRepo: repo.upstreamRepo,
     forkRepo: repo.forkRepo,
-    sweptAt: now,
-    prCount: prs.length,
-    mergedCount,
-    skippedCount,
-    failedCount,
-    report,
-    truncated,
+    sweptAt: new Date().toISOString(),
+    prCount: records.length,
+    ...tally,
+    report: reportLines.join("\n"),
+    truncated: current?.truncated ?? false,
   });
+  ctx.logger.info("summary: {result}", {
+    result: JSON.stringify({ prCount: records.length, ...tally }),
+  });
+  return { dataHandles: [handle] };
+}
 
-  return { dataHandles: [summaryHandle, ...prHandles] };
+// ---------- monolithic convenience -----------------------------------------
+
+/**
+ * Run the whole sweep in one call: `list`, one `review` batch over every
+ * listed PR, then `summary`. Scheduled workflows that want a single step keep
+ * working; an orchestrator that batches or syncs on its own calls the steps
+ * instead.
+ */
+async function sweepAll(
+  args: Repo,
+  ctx: ModelContext,
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const stepArgs: StepArgsInput & { workdir: string; resyncBehind: boolean } = {
+    upstreamRepo: args.upstreamRepo,
+    forkRepo: args.forkRepo,
+    workdir: args.workdir,
+    agent: args.agent,
+    mainBranch: args.mainBranch,
+    swampRepoDir: args.swampRepoDir,
+    sweeperPrompt: args.sweeperPrompt,
+    updateStrategy: args.updateStrategy,
+    resyncBehind: args.resyncBehind,
+  };
+  const listed = await stepList(stepArgs, ctx);
+  if (listed.prs.length === 0) {
+    const handle = await ctx.writeResource("sweep", "noop", {
+      upstreamRepo: args.upstreamRepo,
+      forkRepo: args.forkRepo,
+      sweptAt: new Date().toISOString(),
+      prCount: 0,
+      mergedCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      pendingCount: 0,
+      report: "No open PRs from fork; nothing to sweep.",
+      truncated: listed.truncated,
+    });
+    return { dataHandles: [handle] };
+  }
+  await stepReview(
+    { ...stepArgs, numbers: listed.prs.map((pr) => pr.number) },
+    ctx,
+  );
+  const summary = await stepSummary(stepArgs, ctx);
+  return {
+    dataHandles: [...listed.dataHandles, ...summary.dataHandles],
+  };
 }
 
 export const model = {
   type: "@maphew/pr-sweep",
-  version: "2026.10.14.1",
+  version: "2026.10.18.1",
   globalArguments: z.object({}),
   upgrades: [
     {
@@ -1042,8 +1652,21 @@ export const model = {
         "Source moved to maphew/swamp-extensions (AGPL-3.0); the sweeper prompt is now bundled and a custom prompt can be set with sweeperPrompt",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
+    {
+      toVersion: "2026.10.18.1",
+      description:
+        "Composable steps: list / review / sync / verdicts / summary split the monolithic sweep, which remains as a convenience method. New `open-prs` queue resource and a `pending` verdict on per-PR records.",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
   ],
   resources: {
+    "open-prs": {
+      description:
+        "The queue of open fork PRs one `list` step produced (instance `open-prs-current`)",
+      schema: OpenPrsSchema,
+      lifetime: "30d" as const,
+      garbageCollection: 10,
+    },
     sweep: {
       description: "PR sweep run summary",
       schema: SweepSummarySchema,
@@ -1058,11 +1681,49 @@ export const model = {
     },
   },
   methods: {
+    list: {
+      description:
+        "List open PRs the fork contributes to the upstream repo, write them as the sweep queue (`open-prs-current` plus one `pr` record each), and report how they group into review batches. The first step an orchestrator runs.",
+      arguments: StepArgsBaseSchema,
+      execute: stepList,
+    },
+    review: {
+      description:
+        "Run one headless agent over a batch of PRs from the queue with the bundled sweeper prompt, then record each PR's verdict, post-run state, and branch-sync outcome on its `pr` record. Small batches only — the orchestrator decides grouping; pass `numbers` for one batch.",
+      arguments: StepArgsBaseSchema.extend({
+        numbers: z.array(z.number().int()).default([]).describe(
+          "PR numbers this batch covers; empty means every PR in open-prs-current",
+        ),
+        resyncBehind: z.boolean().default(true).describe(
+          "Run the deterministic branch-sync pass after the agent finishes (turn off to sync separately)",
+        ),
+      }),
+      execute: stepReview,
+    },
+    sync: {
+      description:
+        "Deterministic branch-sync pass with bounded verify/top-up for the queue (or `numbers`): re-fetch the base and bring behind PR branches up to date. No agent runs.",
+      arguments: StepArgsBaseSchema,
+      execute: stepSync,
+    },
+    verdicts: {
+      description:
+        "Read back the recorded per-PR results for the current queue as data (logs the payload so a harness can see it). Read-only.",
+      arguments: StepArgsBaseSchema,
+      execute: stepVerdicts,
+    },
+    summary: {
+      description:
+        "Tally the recorded per-PR results (`merged`/`skipped`/`failed`/`pending`) into the `sweep` summary resource and a markdown report.",
+      arguments: StepArgsBaseSchema,
+      execute: stepSummary,
+    },
     sweep: {
-      description: "Sweep open PRs from a fork in an upstream repo",
+      description:
+        "Monolithic convenience: list, one review batch over every open PR, and summary in a single call. Prefer the composable steps when orchestrating.",
       arguments: RepoSchema,
       execute: async (args: Repo, ctx: ModelContext) =>
-        await executeSweep(args, ctx),
+        await sweepAll(args, ctx),
     },
   },
 };

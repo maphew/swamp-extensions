@@ -1,7 +1,9 @@
 import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
   BUNDLED_SWEEPER_PROMPT,
-  buildAgentInvocation,
+  AGENT_TASK_INSTANCE,
+  AGENT_TASK_TYPE,
+  buildReviewPrompt,
   combineVerifyResult,
   derivePrState,
   mergeVerdicts,
@@ -292,31 +294,28 @@ Deno.test("updateStrategyInstruction states the merge and rebase contracts", () 
   assertEquals(rebase.includes("never bare --force"), true);
 });
 
-Deno.test("buildAgentInvocation maps each agent to its real binary", () => {
-  const opts = {
-    prompt: "TASK",
-    systemPrompt: "SYS",
-    workingDir: "/repo",
-  };
-  assertEquals(buildAgentInvocation("kilo", opts).binary, "kilo");
-  assertEquals(buildAgentInvocation("claude", opts).binary, "claude");
-  assertEquals(buildAgentInvocation("codex", opts).binary, "codex");
-  assertEquals(buildAgentInvocation("opencode", opts).binary, "opencode");
+Deno.test("buildReviewPrompt names the batch, strategy and verdict file", () => {
+  const prompt = buildReviewPrompt(
+    { upstreamRepo: "Kilo-Org/kilocode", forkRepo: "maphew/kilocode", mainBranch: "main" },
+    [{ number: 7040, title: "Fix rate limiting" }],
+    { updateStrategy: "merge", verdictPath: "/tmp/v.txt" },
+  );
+  assertEquals(prompt.includes("Kilo-Org/kilocode"), true);
+  assertEquals(prompt.includes("maphew/kilocode"), true);
+  assertEquals(prompt.includes("PR #7040: Fix rate limiting"), true);
+  assertEquals(prompt.includes("do not rebase"), true);
+  assertEquals(prompt.includes("/tmp/v.txt"), true);
 });
 
-Deno.test("buildAgentInvocation passes the system prompt and task", () => {
-  const opts = {
-    prompt: "TASK",
-    systemPrompt: "SYS",
-    workingDir: "/repo",
-  };
-  const kilo = buildAgentInvocation("kilo", opts);
-  assertEquals(kilo.args.join("\n").includes("SYS\n\nTASK"), true);
-  assertEquals(kilo.args.includes("/repo"), true);
-
-  const opencode = buildAgentInvocation("opencode", opts);
-  assertEquals(opencode.args[0], "TASK");
-  assertEquals(opencode.args.includes("--system-prompt=SYS"), true);
+Deno.test("buildReviewPrompt scopes the batch so one agent reports per PR", () => {
+  const prompt = buildReviewPrompt(
+    { upstreamRepo: "a/b", forkRepo: "c/b", mainBranch: "main" },
+    [{ number: 1, title: "x" }, { number: 2, title: "y" }],
+    { updateStrategy: "merge", verdictPath: "/tmp/v.txt" },
+  );
+  assertEquals(prompt.includes("exactly these 2 pull request(s)"), true);
+  assertEquals(prompt.includes("#1, #2"), true);
+  assertEquals(prompt.includes("one verdict line per PR in the batch"), true);
 });
 
 Deno.test("resolveSweeperPromptPath prefers an explicit override", () => {
@@ -364,4 +363,154 @@ Deno.test("the bundled sweeper prompt ships with the extension", async () => {
   );
   assertEquals(prompt.includes("PR Sweeper"), true);
   assertEquals(prompt.includes("PR #<number>"), true);
+});
+
+// ---------- composable steps: pure seams ----------------------------------
+
+import {
+  normalizeRun,
+  planReviewBatches,
+  prInstanceName,
+  tallyPrs,
+  withQueueRepoPair,
+} from "./pr_sweep.ts";
+
+Deno.test("planReviewBatches keeps the whole list as one batch when batchSize is 0", () => {
+  assertEquals(
+    planReviewBatches([{ number: 1 }, { number: 2 }, { number: 3 }], 0),
+    [[1, 2, 3]],
+  );
+});
+
+Deno.test("planReviewBatches splits into batches of at most n, in order", () => {
+  const prs = [1, 2, 3, 4, 5].map((number) => ({ number }));
+  assertEquals(planReviewBatches(prs, 2), [[1, 2], [3, 4], [5]]);
+});
+
+Deno.test("planReviewBatches returns no batches for an empty list", () => {
+  assertEquals(planReviewBatches([], 3), []);
+});
+
+Deno.test("withQueueRepoPair fills an omitted repo pair from the queue", () => {
+  const queue = {
+    upstreamRepo: "Kilo-Org/kilocode",
+    forkRepo: "maphew/kilocode",
+    listedAt: "2026-10-18T00:00:00.000Z",
+    prs: [],
+    truncated: false,
+  };
+  assertEquals(
+    withQueueRepoPair({ batchSize: 0 }, queue),
+    {
+      batchSize: 0,
+      upstreamRepo: "Kilo-Org/kilocode",
+      forkRepo: "maphew/kilocode",
+    },
+  );
+});
+
+Deno.test("withQueueRepoPair leaves explicit arguments alone", () => {
+  const queue = {
+    upstreamRepo: "Kilo-Org/kilocode",
+    forkRepo: "maphew/kilocode",
+    listedAt: "2026-10-18T00:00:00.000Z",
+    prs: [],
+    truncated: false,
+  };
+  const args = { upstreamRepo: "other/up", forkRepo: "me/up" };
+  assertEquals(withQueueRepoPair(args, queue), args);
+});
+
+Deno.test("withQueueRepoPair keeps a partial explicit pair for normalizeRun to reject", () => {
+  const queue = {
+    upstreamRepo: "Kilo-Org/kilocode",
+    forkRepo: "maphew/kilocode",
+    listedAt: "2026-10-18T00:00:00.000Z",
+    prs: [],
+    truncated: false,
+  };
+  assertEquals(
+    withQueueRepoPair({ upstreamRepo: "other/up" }, queue),
+    { upstreamRepo: "other/up", forkRepo: "maphew/kilocode" },
+  );
+});
+
+Deno.test("normalizeRun applies step defaults", () => {
+  const { repo, settings } = normalizeRun({
+    upstreamRepo: "Kilo-Org/kilocode",
+    forkRepo: "maphew/kilocode",
+  });
+  assertEquals(repo, {
+    upstreamRepo: "Kilo-Org/kilocode",
+    forkRepo: "maphew/kilocode",
+  });
+  assertEquals(settings, {
+    agent: "kilo",
+    mainBranch: "main",
+    swampRepoDir: undefined,
+    sweeperPrompt: undefined,
+    updateStrategy: "merge",
+  });
+});
+
+Deno.test("normalizeRun refuses a step with no repo pair", () => {
+  let message = "";
+  try {
+    normalizeRun({});
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err);
+  }
+  assertEquals(message.includes("upstreamRepo and forkRepo"), true);
+});
+
+Deno.test("prInstanceName is stable per upstream repo and PR number", () => {
+  assertEquals(prInstanceName("Kilo-Org/kilocode", 7040), "Kilo-Org-kilocode-7040");
+});
+
+Deno.test("tallyPrs counts pending separately from skipped and failed", () => {
+  const tally = tallyPrs([
+    { number: 1, title: "a", verdict: "merged" },
+    { number: 2, title: "b", verdict: "merged", merged: true },
+    { number: 3, title: "c", verdict: "skipped" },
+    { number: 4, title: "d", verdict: "conflict" },
+    { number: 5, title: "e", verdict: "pending" },
+    { number: 6, title: "f", verdict: "reviewed" },
+  ]);
+  assertEquals(tally, {
+    mergedCount: 2,
+    skippedCount: 1,
+    failedCount: 1,
+    // `reviewed` is a real verdict, not a pending one: the PR was handled.
+    pendingCount: 1,
+  });
+});
+
+Deno.test("tallyPrs counts an unknown verdict as pending", () => {
+  assertEquals(tallyPrs([{ number: 1, title: "a", verdict: "unknown" }]).pendingCount, 1);
+});
+
+Deno.test("review routes its agent through @maphew/agent-task's run primitive", () => {
+  assertEquals(AGENT_TASK_TYPE, "@maphew/agent-task");
+  assertEquals(AGENT_TASK_INSTANCE, "agent-task-queue");
+});
+
+Deno.test("the behavior exposes the composable steps and the sweep convenience", () => {
+  assertEquals(
+    Object.keys(model.methods).sort(),
+    ["list", "review", "summary", "sweep", "sync", "verdicts"],
+  );
+});
+
+Deno.test("review defaults its batch and sync settings", () => {
+  const parsed = model.methods.review.arguments.parse({
+    upstreamRepo: "Kilo-Org/kilocode",
+    forkRepo: "maphew/kilocode",
+  });
+  assertEquals(parsed.numbers, []);
+  assertEquals(parsed.resyncBehind, true);
+  assertEquals(parsed.updateStrategy, "merge");
+});
+
+Deno.test("list reports its batch grouping input default", () => {
+  assertEquals(model.methods.list.arguments.parse({}).batchSize, 0);
 });

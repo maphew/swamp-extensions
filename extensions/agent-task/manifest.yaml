@@ -1,11 +1,13 @@
 manifestVersion: 1
 name: "@maphew/agent-task"
-version: "2026.10.15.1"
+version: "2026.10.18.1"
 description: >-
   Headless agent dispatch as a swamp behavior: filter the bd ready queue into a
-  typed manifest, branch a target checkout and run one agent on a task, or sweep
-  every candidate under a single behavior lock. Replaces the .kilo/agents
-  ready-queue.sh / run-task.sh / bd-sweep.sh shell cluster.
+  typed manifest, branch a target checkout and run one agent on a task, sweep
+  every candidate under a single behavior lock, or run a single agent with no
+  git work at all (`run`). Other extensions call `run` through runModel so
+  there is one authority on how a headless agent is launched. Replaces the
+  .kilo/agents ready-queue.sh / run-task.sh / bd-sweep.sh shell cluster.
 repository: "https://github.com/maphew/swamp-extensions.git"
 license: MIT
 paths:

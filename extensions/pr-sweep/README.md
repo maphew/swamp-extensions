@@ -26,18 +26,49 @@ swamp extension pull @maphew/pr-sweep
 swamp model create @maphew/pr-sweep pr-sweep
 ```
 
-## Method
+## Methods
 
-| Method  | Purpose                                                                 |
-| ------- | ----------------------------------------------------------------------- |
-| `sweep` | Review, update, and merge open PRs from one fork in one upstream repo   |
+The sweep is **composable**. Each step reads its inputs from written data, so
+steps chain without wiring anything between them, and an orchestrator (Ceph, a
+foreman agent, a workflow, or you) decides how work groups and when it runs.
+
+| Method     | Purpose                                                                    |
+| ---------- | -------------------------------------------------------------------------- |
+| `list`     | Open fork PRs -> the queue (`open-prs-current` + one `pr` record each), and the review batches that queue suggests |
+| `review`   | One headless agent over **one batch** of PRs; records each verdict, state and sync outcome |
+| `sync`     | Deterministic branch sync + bounded verify/top-up. No agent                |
+| `verdicts` | Read the recorded per-PR results back as data                              |
+| `summary`  | Tally results into the `sweep` summary resource and a markdown report      |
+| `sweep`    | Convenience: `list` -> one `review` batch over every PR -> `summary`       |
 
 ```bash
+# One call, as before
 swamp model method run pr-sweep sweep \
   --input upstreamRepo="Kilo-Org/kilocode" \
   --input forkRepo="maphew/kilocode" \
   --input workdir="/path/to/kilocode"
+
+# Or compose: list the queue, then review one batch of two
+swamp model method run pr-sweep list --input workdir="/path/to/kilocode"
+swamp model method run pr-sweep review --input numbers='[7040,7041]'
+swamp model method run pr-sweep sync
+swamp model method run pr-sweep summary
 ```
+
+### Who decides what
+
+The behavior does the work; the caller decides the shape of it.
+
+- **Batching.** `list` takes `batchSize` and reports how the queue groups
+  (`batches`), but never splits work on its own. One agent for one PR, one
+  agent for ten — the orchestrator's call.
+- **Sync timing.** `review` syncs its own batch by default (`resyncBehind`);
+  turn it off to sync later, or call `sync` separately.
+- **Delegation.** Each `review` call _is_ one worker. A foreman that wants
+  three agents running makes three `review` calls, one per batch.
+
+The agent itself is launched by `@maphew/agent-task`'s `run` method — pr-sweep
+owns the prompt and the batch, not the invocation.
 
 ## Arguments
 
@@ -48,7 +79,9 @@ swamp model method run pr-sweep sweep \
 | `workdir`        | —        | Local checkout of the upstream repo (**required**)                                           |
 | `agent`          | `kilo`   | Headless agent to run the sweep (`claude`, `codex`, `opencode`, `kilo`)                      |
 | `mainBranch`     | `main`   | Base branch to rebase and merge into                                                         |
-| `resyncBehind`   | `true`   | After the agent run, bring any behind PR branch up to date                                   |
+| `resyncBehind`   | `true`   | `review` only: bring the batch's behind branches up to date after the agent run               |
+| `numbers`        | all      | `review` / `sync` only: the PR numbers this call covers                                       |
+| `batchSize`      | `0`      | `list` only: group the queue into review batches of at most n (0 = one batch)                 |
 | `updateStrategy` | `merge`  | How to update a behind branch: merge the base in (no force-push) or rebase (force-push)      |
 | `sweeperPrompt`  | —        | Absolute path to a custom sweeper prompt (overrides the bundled prompt)                      |
 | `swampRepoDir`   | —        | Legacy fallback: if set and `<dir>/.kilo/agents/pr-sweeper.md` exists, it overrides the prompt |

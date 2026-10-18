@@ -19,9 +19,19 @@
  * concurrent runs cannot silently double-claim a bead, mirroring the old
  * `run-task.sh` guarantee.
  *
+ *   - `run` is the runner primitive: given a prompt, a checkout and an agent,
+ *     it builds that agent's invocation and runs it, capturing stdout, stderr
+ *     and the exit code. It does no git work and makes no plan — it is the one
+ *     authority on *how* a headless agent is launched, so every caller that
+ *     needs an agent (this behavior's `dispatch`/`sweep`, `@maphew/pr-sweep`'s
+ *     review batches, or a foreman agent's ad-hoc work) gets identical
+ *     invocations instead of a copy of the same switch statement.
+ *
  * `git` and `bd` are subprocess dependencies, exactly as in `@maphew/bd` and
- * `@maphew/handoff`; there is no cross-behavior `runModel` dependency, so the
- * behavior is portable to any Git checkout and any beads repository.
+ * `@maphew/handoff`. `dispatch` and `sweep` use no cross-behavior `runModel`,
+ * so the behavior is portable to any Git checkout and any beads repository;
+ * `run` is callable on its own by another extension, which does declare this
+ * one under `dependencies`.
  *
  * @module
  */
@@ -241,6 +251,36 @@ const DispatchArgsSchema = z.object({
     "Bead id the task belongs to, for result naming and reporting",
   ),
   gitCommand: z.string().default("git").describe("Path to the git CLI"),
+});
+
+/** Arguments for the `run` method: launch one agent process, nothing else. */
+const RunArgsSchema = z.object({
+  prompt: z.string().min(1).describe(
+    "The task prompt handed to the agent",
+  ),
+  systemPrompt: z.string().default("").describe(
+    "Instruction prepended to the task prompt (the run contract); empty means the task prompt alone",
+  ),
+  workdir: z.string().min(1).describe("Checkout the agent runs in"),
+  agent: AgentSchema.default("kilo").describe("Headless agent binary to run"),
+  actor: z.string().default("").describe(
+    "BEADS_ACTOR exported to the agent. Empty means no actor is exported, which is right for callers that do their own bookkeeping; dispatch/sweep derive one per branch.",
+  ),
+});
+
+/** Outcome of one `run` invocation. */
+const RunResultSchema = z.object({
+  workdir: z.string().describe("Checkout the agent ran in"),
+  agent: AgentSchema.describe("Headless agent that was run"),
+  binary: z.string().describe("Resolved agent binary"),
+  actor: z.string().describe("BEADS_ACTOR exported, or empty"),
+  startedAt: z.string().describe("ISO-8601 start timestamp"),
+  finishedAt: z.string().describe("ISO-8601 finish timestamp"),
+  durationMs: z.number().int().describe("Wall-clock duration in milliseconds"),
+  exitCode: z.number().int().describe("Agent exit code"),
+  success: z.boolean().describe("True when the agent exited zero"),
+  stdout: z.string().describe("Agent stdout"),
+  stderr: z.string().describe("Agent stderr"),
 });
 
 /** Arguments for the `sweep` method. */
@@ -769,33 +809,21 @@ async function dispatchOne(
     });
     await setupBranch(candidate, deps);
 
-    const { binary, args } = buildAgentInvocation(candidate.agent, {
+    const result = await runAgentProcess({
       prompt: candidate.task,
       systemPrompt: runnerInstruction(candidate),
-      workingDir: candidate.workdir,
-    });
-
-    const env: Record<string, string> = { BEADS_ACTOR: actor };
-    if (deps.traceHeaders?.traceparent) {
-      env.TRACEPARENT = deps.traceHeaders.traceparent;
-    }
-    if (deps.traceHeaders?.tracestate) {
-      env.TRACESTATE = deps.traceHeaders.tracestate;
-    }
-
-    const result = await runCommand(binary, args, {
-      cwd: candidate.workdir,
-      env,
-      signal: deps.signal,
-    });
+      workdir: candidate.workdir,
+      agent: candidate.agent,
+      actor,
+    }, deps);
     stdout = result.stdout;
     stderr = result.stderr;
-    exitCode = result.code;
+    exitCode = result.exitCode;
     success = result.success;
     if (!success) {
       deps.logger.error("Agent {agent} exited {code} on {branch}", {
         agent: candidate.agent,
-        code: result.code,
+        code: result.exitCode,
         branch: candidate.branch,
         stderr: stderr.slice(0, 2000),
       });
@@ -823,6 +851,101 @@ async function dispatchOne(
     success,
     stdout,
     stderr,
+  };
+}
+
+/**
+ * Launch one headless agent. This is the runner primitive: no git, no plan, no
+ * bookkeeping beyond the process itself. `dispatch` branches and then calls it;
+ * `sweep` calls it per candidate; another extension calls it through
+ * `runModel` when it wants an agent but owns its own git workflow.
+ *
+ * A non-zero exit is reported in the result, never thrown: the caller decides
+ * whether an agent that failed is fatal (dispatch does) or one row of a sweep.
+ */
+async function run(
+  args: z.infer<typeof RunArgsSchema>,
+  ctx: {
+    writeResource: (
+      spec: string,
+      instance: string,
+      data: Record<string, unknown>,
+    ) => Promise<{ name: string }>;
+    signal: AbortSignal;
+    traceHeaders?: Readonly<Record<string, string>>;
+    logger: Logger;
+  },
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const parsed = RunArgsSchema.parse(args);
+  const result = await runAgentProcess(parsed, {
+    signal: ctx.signal,
+    traceHeaders: ctx.traceHeaders,
+    logger: ctx.logger,
+  });
+  const instance = `run-${sanitizeInstanceName(parsed.actor || parsed.agent)}`;
+  const handle = await ctx.writeResource("run", instance, { ...result });
+  return { dataHandles: [handle] };
+}
+
+/**
+ * The process-level half of a dispatch: build the invocation, export the actor
+ * and trace context, run it, capture the streams. Shared by `run` and by
+ * `dispatchOne` so an ad-hoc run and a dispatched one cannot drift apart.
+ */
+async function runAgentProcess(
+  args: z.infer<typeof RunArgsSchema>,
+  deps: {
+    signal?: AbortSignal;
+    traceHeaders?: Readonly<Record<string, string>>;
+    logger: Logger;
+  },
+): Promise<z.infer<typeof RunResultSchema>> {
+  const startedAt = new Date().toISOString();
+  const { binary, args: argv } = buildAgentInvocation(args.agent, {
+    prompt: args.prompt,
+    systemPrompt: args.systemPrompt,
+    workingDir: args.workdir,
+  });
+
+  const env: Record<string, string> = {};
+  if (args.actor) env.BEADS_ACTOR = args.actor;
+  if (deps.traceHeaders?.traceparent) {
+    env.TRACEPARENT = deps.traceHeaders.traceparent;
+  }
+  if (deps.traceHeaders?.tracestate) {
+    env.TRACESTATE = deps.traceHeaders.tracestate;
+  }
+
+  deps.logger.info("Running {binary} in {workdir}", {
+    binary,
+    workdir: args.workdir,
+  });
+  const result = await runCommand(binary, argv, {
+    cwd: args.workdir,
+    env: Object.keys(env).length > 0 ? env : undefined,
+    signal: deps.signal,
+  });
+  if (!result.success) {
+    deps.logger.error("{binary} exited {code}", {
+      binary,
+      code: result.code,
+      stderr: result.stderr.slice(0, 2000),
+    });
+  }
+
+  const finishedAt = new Date().toISOString();
+  return {
+    workdir: args.workdir,
+    agent: args.agent,
+    binary,
+    actor: args.actor,
+    startedAt,
+    finishedAt,
+    durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
+    exitCode: result.code,
+    success: result.success,
+    stdout: result.stdout,
+    stderr: result.stderr,
   };
 }
 
@@ -1079,13 +1202,19 @@ async function sweep(
 /** Swamp behavior definition for agent task dispatch. */
 export const model = {
   type: "@maphew/agent-task",
-  version: "2026.10.15.1",
+  version: "2026.10.18.1",
   globalArguments: z.object({}),
   upgrades: [
     {
       toVersion: "2026.10.15.1",
       description:
         "Initial release: filterQueue / dispatch / sweep methods extracted from .kilo/agents ready-queue.sh, run-task.sh, and bd-sweep.sh",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.18.1",
+      description:
+        "Add the `run` runner primitive (one agent process, no git) and route dispatch through it; other extensions call `run` via runModel instead of copying buildAgentInvocation",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -1108,6 +1237,12 @@ export const model = {
     },
   },
   resources: {
+    run: {
+      description: "Outcome of one raw agent invocation (`run`)",
+      schema: RunResultSchema,
+      lifetime: "30d" as const,
+      garbageCollection: 20,
+    },
     manifest: {
       description: "Filtered bd ready queue of dispatch candidates",
       schema: ManifestSchema,
@@ -1153,6 +1288,12 @@ export const model = {
         "Dispatch every candidate in a manifest serially under one behavior lock",
       arguments: SweepArgsSchema,
       execute: sweep,
+    },
+    run: {
+      description:
+        "Run one headless agent on a prompt in a checkout, and nothing else: no branching, no source control, no plan. The runner primitive other extensions call through `runModel` when they own their own git workflow.",
+      arguments: RunArgsSchema,
+      execute: run,
     },
   },
 };

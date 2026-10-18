@@ -39,6 +39,26 @@ swamp extension pull @maphew/agent-task
 | `filterQueue` | Filter `bd ready` into a typed `manifest` of dispatch candidates        |
 | `dispatch`    | Branch a target checkout and run one agent on one task                  |
 | `sweep`       | Dispatch every candidate from a manifest, serially, under one lock      |
+| `run`         | Run one headless agent on a prompt in a checkout — no git, no plan      |
+
+### `run`
+
+`run` is the **runner primitive**: the one authority on how a headless agent is
+launched. It builds the agent's invocation, exports `BEADS_ACTOR` and trace
+context, runs it, and captures stdout, stderr and the exit code. It does no
+branching and writes nothing to the target repo.
+
+Other extensions call it through `runModel` (declaring `@maphew/agent-task`
+under `dependencies`) when they want an agent but own their own git workflow —
+`@maphew/pr-sweep` does exactly that for its review batches, so there is one
+launch path instead of a copy per extension.
+
+```bash
+swamp model method run agent-task-queue run \
+  --input workdir="/path/to/checkout" \
+  --input prompt="Do the thing" \
+  --input systemPrompt="You are working in /path/to/checkout"
+```
 
 ### `filterQueue`
 
