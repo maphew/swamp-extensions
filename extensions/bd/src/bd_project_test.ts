@@ -56,6 +56,14 @@ function makeCtx(dir: string): TestCtx {
   };
 }
 
+/**
+ * `bd` stamps an issue's `owner` from the git `user.email` of the project,
+ * falling back to the machine's global git config. A CI runner has no global
+ * identity, so without one in the sandbox `owner` comes back null and the
+ * round-trip assertions fail on CI while passing on a developer's machine.
+ */
+export const TEST_GIT_EMAIL = "bd-model-test@example.invalid";
+
 async function makeProject(): Promise<string> {
   const dir = await Deno.makeTempDir({ prefix: "bd_model_test_" });
   const proc = new Deno.Command("bd", {
@@ -66,6 +74,24 @@ async function makeProject(): Promise<string> {
   });
   const out = await proc.output();
   if (!out.success) throw new Error("bd init failed in test sandbox");
+
+  // bd init leaves a git repo behind; give it an identity of its own so the
+  // tests do not depend on the machine they run on.
+  const git = new Deno.Command("git", {
+    args: ["config", "user.email", TEST_GIT_EMAIL],
+    cwd: dir,
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const gitOut = await git.output();
+  if (!gitOut.success) {
+    throw new Error(
+      `git config failed in test sandbox: ${
+        new TextDecoder().decode(gitOut.stderr)
+      }`,
+    );
+  }
+
   return dir;
 }
 
@@ -102,7 +128,7 @@ Deno.test("@maphew/bd create/show/update/close round-trip", async () => {
     const shown = [...ctx.written.values()][0];
     assertEquals(shown.id, id);
     assertEquals(shown.title, "test issue");
-    assertEquals(shown.owner !== null, true);
+    assertEquals(shown.owner, TEST_GIT_EMAIL);
 
     ctx.written.clear();
     await runMethod(
