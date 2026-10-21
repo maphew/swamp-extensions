@@ -1,0 +1,82 @@
+{
+  "extension": "@maphew/repo-doctor",
+  "version": "2026.10.21.2",
+  "reviewedAt": "2026-10-21T21:29:00Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. denoBin is an executable name or path, not a secret, and resolveDenoBin falls back to DENO_BIN before the ~/.swamp/deno/deno path so nothing has to be vaulted."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "issue",
+      "note": "checkScaffolding logs a structured completion line and a warn when deno is missing, but nothing on entry, so a run that finds no scaffolding dirs is silent apart from the completion line. This matches the pre-existing pattern in this extension (checkExtensions, checkGitignore, findHardcodedPaths also log only on completion), so it is a file-wide follow-up rather than a regression from this change."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "A missing deno executable is a reported skip with an actionable skipReason, not an exception. A non-zero deno check whose output cannot be parsed becomes a file-level error finding carrying the last three stderr lines, so a deno output-format change degrades to a visible finding instead of silent success. The one gap: resolveDenoBin probes candidates with --version and swallows probe failures, so a deno binary that resolves but then fails to spawn inside runDenoCheck would surface as a raw Deno.Command throw."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "issue",
+      "note": "Six new tests cover the pure helpers (stripAnsi, isScaffoldingSource, parseDenoCheckOutput x4 including ANSI, hint lines, location-less output, clean runs and percent-encoded URLs), bringing the extension to 17. The checkScaffolding IO path itself is untested: dir walking, nearestPackageRoot resolution, resolveDenoBin fallback order, and the deno invocation. Consistent with this extension's existing pure-helper-only test style. The parser was separately verified end-to-end against real `deno check .pi/extensions/swamp-audit.ts` output during this review: 5 diagnostics parsed, all 5 with correct file and line."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "Read-only: it typechecks files and writes one resource. Re-runnable, no external mutation, no partial-write window because the resource is written once from a fully assembled report."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "Parses `deno check` human-readable diagnostics \u2014 an undocumented format \u2014 after stripping ANSI codes, pairing each `TS<code> [ERROR|WARN]` header with the next `at file://...` location. Rendered to real output during review. Note that `deno check` resolves the scaffolding's declared jsr:/npm: imports, so a scheduled run performs implicit network fetches for whatever those plugins import; that is inherent to typechecking, not a defect here."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "The single Deno.Command is awaited via output(), so stdout/stderr pipes are drained and closed by the runtime on every path. No temp files, sockets, or long-lived handles; the walk generator is fully consumed per directory."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README and test fixtures use generic roots (/repo, file:///repo/...) and repo-relative dirs; no real hostnames, home paths, IPs, or account identifiers. Default scaffoldingDirs are the generic .kilo/.opencode/.pi locations. README documents checkScaffolding, the two new global args, the scaffolding-current output, and the reason a dir with unparsable deno output reports an environment gap rather than a plugin defect."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "ScaffoldingReportSchema is a plain z.object(...) with no .passthrough(), reuses the existing FindingSchema for findings, and globalArguments is re-parsed at the top of checkScaffolding so CEL validation still works."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "The new scaffolding resource declares lifetime 7d and garbageCollection 10, matching every other spec in the extension."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle behavior: it audits local repo state and reports findings, with no create/update/delete/sync surface to complete."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "na",
+      "note": "checkScaffolding mutates nothing outside its own resource, so there is nothing to gate behind policy/live pre-flight labels."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "The new spec has a single writer using the stable name scaffolding-current, distinct from scan/paths/extensions/gitignore-current. No cross-spec or cross-method collisions."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "No method reads previously stored state; there is no update/delete/sync path that would need readResource."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "model.version and the manifest both move to 2026.10.21.1 with a toVersion 2026.10.21.1 no-op upgrade entry, needed because globalArguments gained scaffoldingDirs and denoBin. Both new fields carry defaults, so existing instances migrate without attribute changes and the no-op entry is correct."
+    }
+  ]
+}
