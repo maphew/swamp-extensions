@@ -98,12 +98,13 @@ nightly workflow can reclaim stale work and reassign it to the ready pool.
 
 `prime` writes a single `primeContext` resource instead of issue resources: the
 `bd prime` workflow text (the same session-close protocol and git-authority
-policy harnesses inject at session start), the parsed `agent.profile`
-(`conservative` | `minimal` | `team-maintainer`, or null), and a `generatedAt`
+policy harnesses inject at session start), the parsed `agent.profile` (the
+explicit non-default profile bd prints, e.g. `team-maintainer`; null when the
+profile is implicit, which is bd's conservative default), and a `generatedAt`
 timestamp. Options mirror bd's own flags: `memories`
-(`include`/`only`/`exclude`), `maxMemories`, and `maxMemoryChars`. Point a
-workflow guard or report at it to assert the active profile without re-running
-the CLI.
+(`include`/`only`/`exclude`), `maxMemories`, and `maxMemoryChars` (bytes). Point
+a workflow guard or report at it to assert the active profile without
+re-running the CLI.
 
 `list`, `query`, and `ready` take a `limit` (default 50, max 500) and set `truncated:
 true` on every returned issue when more matched than the limit allowed. The

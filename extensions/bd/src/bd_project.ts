@@ -198,7 +198,7 @@ const PrimeArgsSchema = z.object({
     "Cap the number of injected memories (0 = unlimited); whole memories only",
   ),
   maxMemoryChars: z.number().int().min(0).optional().describe(
-    "Cap the total characters of injected memories (0 = unlimited)",
+    "Cap the total bytes of injected memories (0 = unlimited); whole memories only",
   ),
 });
 
@@ -252,7 +252,7 @@ const PrimeContextSchema = z.object({
     "The bd prime workflow context and git-authority policy text",
   ),
   profile: z.string().nullable().describe(
-    "Parsed agent.profile (conservative|minimal|team-maintainer), or null when absent",
+    "The explicit agent.profile bd prints (e.g. team-maintainer), or null when the profile is implicit/default",
   ),
   generatedAt: z.string().describe("When the context was captured"),
 });
@@ -312,6 +312,7 @@ async function runBd(
   args: string[],
   cwd: string,
 ): Promise<BdResult> {
+  // swamp-quality-ignore deno-command: the bd CLI is the contract this extension wraps; args are a validated argv array (no shell).
   const proc = new Deno.Command(command, {
     args,
     cwd,
@@ -883,7 +884,11 @@ async function primeContext(
   );
 
   const content = stdout.trim();
-  const profile = /agent\.profile=([A-Za-z-]+)/.exec(content)?.[1] ?? null;
+  // bd prints an explicit agent.profile= only for a non-default profile. Search
+  // the policy text before the appended memories so a memory that happens to
+  // mention agent.profile= cannot be mistaken for the active profile.
+  const policyText = content.split(/\n#{1,6}\s+.*Persistent Memories/i)[0];
+  const profile = /agent\.profile=([A-Za-z-]+)/.exec(policyText)?.[1] ?? null;
   const handle = await ctx.writeResource("primeContext", "prime-current", {
     content,
     profile,

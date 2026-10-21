@@ -636,3 +636,52 @@ Deno.test("@maphew/bd prime honors memories modes", async () => {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("@maphew/bd prime parses an explicit agent.profile", async () => {
+  const dir = await makeProject();
+  try {
+    await Deno.writeTextFile(
+      `${dir}/.beads/PRIME.md`,
+      "# Custom Prime\n\n**Policy:** agent.profile=team-maintainer is active.\n",
+    );
+
+    // A memory mentioning a different profile must not win over the policy line.
+    const remember = new Deno.Command("bd", {
+      args: ["remember", "old note: agent.profile=minimal"],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    });
+    assert((await remember.output()).success);
+
+    const ctx = makeCtx(dir);
+    await runMethod("prime", {}, ctx);
+    assertEquals(ctx.written.get("prime-current")!.profile, "team-maintainer");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd prime leaves an implicit profile null", async () => {
+  const dir = await makeProject();
+  try {
+    await Deno.writeTextFile(
+      `${dir}/.beads/PRIME.md`,
+      "# Custom Prime\n\nNo explicit profile is printed here.\n",
+    );
+
+    const remember = new Deno.Command("bd", {
+      args: ["remember", "old note: agent.profile=minimal"],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    });
+    assert((await remember.output()).success);
+
+    const ctx = makeCtx(dir);
+    await runMethod("prime", {}, ctx);
+    assertEquals(ctx.written.get("prime-current")!.profile, null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

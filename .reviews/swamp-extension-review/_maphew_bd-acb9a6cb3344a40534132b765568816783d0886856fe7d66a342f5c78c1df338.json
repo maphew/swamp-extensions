@@ -1,0 +1,83 @@
+{
+  "extension": "@maphew/bd",
+  "version": "2026.10.16.1",
+  "reviewedAt": "2026-10-21T19:38:00Z",
+  "scope": "Unreleased delta since 2026.10.15.2 (PR #12): the new read-only `prime` method, its `primeContext` resource and schema, PrimeArgsSchema flag mapping, README/manifest updates, and tests. Post-merge hardening from this review: maxMemoryChars is documented as bd's byte cap, the agent.profile parse now searches only the policy text before the appended memories, two tests cover explicit and implicit profiles, and the deno-command quality acceptance is recorded on runBd. Existing methods, resources, global args, and the bd-usable check are unchanged.",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential handling added. prime shells out to the local bd CLI only. The captured text may contain project memories, which bd already persists; the resource stores no environment, tokens, or config beyond that text."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "Single structured log line: 'Captured bd prime context ({chars} chars, profile {profile})' with placeholder props. It logs length and profile only, not the captured content, so memories are not duplicated into logs. Failures go through runBdStrict, which logs exit code and truncated stderr/stdout."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "prime uses runBdStrict, so a nonzero bd exit throws 'bd prime failed (exit N)' with stderr/stdout, matching every other method. Number flags are z.number().int().min(0) and stringified from validated values, so malformed input is rejected before spawn. Empty stdout after a successful exit writes an empty content string rather than throwing; acceptable for a context capture."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "Four prime tests run the real bd CLI in throwaway projects: default capture (content, generatedAt, profile), memories modes (include, --no-memories, --memories-only with maxMemories), explicit-profile parsing via a PRIME.md policy line, and implicit-profile null with a memory that mentions a different profile. maxMemoryChars is not asserted in a test; it is a one-line flag mapping verified manually against bd, and bd's own byte-cap semantics leave little to assert beyond pass-through. Suite: 20 passed."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "Read-only bd invocation; the only write is an upsert of the fixed `prime-current` instance, so repeated runs replace rather than accumulate duplicate resources. generatedAt intentionally changes per run. A failed bd call leaves the previous resource intact because the throw happens before writeResource."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "Flag mapping verified against `bd prime --help`: memories include/only/exclude maps to no flag/--memories-only/--no-memories; maxMemories and maxMemoryChars map to --max-memories/--max-memory-chars, with explicit 0 forcing unlimited. maxMemoryChars is now described as bd's byte cap rather than characters. The profile parse searches only the text before the appended memories heading, so a memory quoting agent.profile= cannot be mistaken for the active policy; default bd output prints no explicit profile, which correctly yields null."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "runBd still uses Deno.Command().output(), which drains and closes stdout/stderr on every call; prime adds no handles, temp files, or watchers. The quality acceptance comment documents why the bd subprocess is the contract rather than a bypass."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README additions use the existing my-tracker/placeholder style and show only literal JSON inputs. No tokens, hostnames, local paths, or account identifiers are added to README, manifest, or tests."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "PrimeArgsSchema and PrimeContextSchema are plain z.object schemas with no passthrough. Objects are validated with .parse at the method boundary, so unknown keys are stripped before reaching bd or the resource store, consistent with the other argument schemas."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "primeContext uses the same lifetime 30d / garbageCollection 10 as issue and dependencyGraph. Because there is one fixed instance, retention stays at one live resource; 30d is generous but harmless for a text snapshot of a few KB."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "pass",
+      "note": "prime is an intentional read-only capture, like ready/query/graph; it adds no update or delete surface for a value derived from the CLI. Existing CRUD for issues is unchanged, so no new gap is introduced."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "pass",
+      "note": "The unchanged bd-usable dependency check still fronts every method, so prime fails cleanly with bd's exit code/stderr when the CLI or database is missing. prime adds no new prerequisite beyond bd and a .beads database, which the README states."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "primeContext writes a single `prime-current` instance by design (same pattern as dependencyGraph's fixed instance). It cannot collide with issue instance names because resources are namespaced by spec. Repeated runs overwrite in place."
+    },
+    {
+      "id": "data-access",
+      "verdict": "pass",
+      "note": "No direct dataRepository access and no cached reads; prime always re-runs bd so the captured context reflects the current PRIME.md, config, and memories. That matches the extension's projection-of-bd model."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "An upgrades entry exists for 2026.10.16.1 with a no-op upgradeAttributes passthrough, matching prior entries, because no global argument schema changed. The model source version, manifest version, and upgrade entry all agree at 2026.10.16.1."
+    }
+  ]
+}
