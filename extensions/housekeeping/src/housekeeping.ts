@@ -234,6 +234,25 @@ async function stdout(cmd: string[], cwd?: string): Promise<string | null> {
 }
 
 /**
+ * Parse `bd orphans --json` into a normalized list.
+ *
+ * bd 1.3.1 prints the literal `null` (valid JSON) when there are no orphans,
+ * so a successful parse is not necessarily an array. Coerce non-array output
+ * to an empty list instead of letting `.map` throw into the caller's catch.
+ */
+export function parseOrphans(
+  raw: string,
+): Array<{ id: string; title: string; status: string }> {
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) return [];
+  return (parsed as Array<Record<string, unknown>>).map((o) => ({
+    id: String(o.issue_id ?? o.id ?? ""),
+    title: String(o.title ?? ""),
+    status: String(o.status ?? ""),
+  }));
+}
+
+/**
  * Parse the `## branch...upstream [ahead N, behind M]` header line from
  * `git status --porcelain=v1 --branch`.
  */
@@ -950,12 +969,7 @@ async function checkBeads(
   const orphansOut = await stdout([bdBin, "orphans", "--json"], dir);
   if (orphansOut) {
     try {
-      const parsed = JSON.parse(orphansOut) as Array<Record<string, unknown>>;
-      report.orphans = parsed.map((o) => ({
-        id: String(o.issue_id ?? o.id ?? ""),
-        title: String(o.title ?? ""),
-        status: String(o.status ?? ""),
-      }));
+      report.orphans = parseOrphans(orphansOut);
     } catch (error) {
       logger.warn("Could not parse `bd orphans --json`", {
         error: error instanceof Error ? error.message : String(error),

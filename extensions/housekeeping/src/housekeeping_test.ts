@@ -15,6 +15,7 @@ import {
   matchesGlob,
   parseDfAvailableBytes,
   parseForEachRef,
+  parseOrphans,
   parseStashList,
   parseStatusHeader,
   parseWorktreeList,
@@ -183,4 +184,19 @@ Deno.test("renderReport says clean when there are no findings", () => {
     findings: [],
   });
   assertEquals(md.includes("Nothing to report"), true);
+});
+
+Deno.test("parseOrphans coerces bd's null no-orphans output to empty", () => {
+  assertEquals(parseOrphans("null"), []);
+});
+
+Deno.test("parseOrphans normalizes issue_id and title", () => {
+  assertEquals(
+    parseOrphans(
+      JSON.stringify([
+        { issue_id: "myswamp-1", title: "done work", status: "open" },
+      ]),
+    ),
+    [{ id: "myswamp-1", title: "done work", status: "open" }],
+  );
 });
