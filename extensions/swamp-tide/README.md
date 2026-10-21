@@ -20,7 +20,7 @@ Create the model and run it through the companion workflow:
 swamp model create @maphew/swamp-tide tide
 
 # Run collect + heatmap via the scheduled workflow
-swamp workflow run swamp-tide
+swamp workflow run @maphew/swamp-tide
 
 # Or run the methods directly
 swamp model method run tide collect

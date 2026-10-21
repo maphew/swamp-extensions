@@ -1,0 +1,82 @@
+{
+  "extension": "@maphew/swamp-tide",
+  "version": "2026.10.15.4",
+  "reviewedAt": "2026-10-21T21:13:10Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. feedUrl is a public club URL, not a secret, and is a documented global arg so a private feed can be supplied per instance."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "issue",
+      "note": "collect and heatmap log structured completion lines but nothing on entry, so a silent run is indistinguishable from a not-yet-started one. ModelContext also declares logger.warn, which no code path uses \u2014 either use it for the dropped-item path or drop it. Same finding class as the @maphew/housekeeping review; follow-up, not a publish blocker."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "issue",
+      "note": "The non-OK HTTP path throws a good message (status, statusText, URL), but a transport failure (DNS, TLS, 30s AbortSignal timeout) propagates as a bare TypeError with no feed URL attached. An invalid `timezone` global arg throws RangeError 'Invalid time zone specified' from inside Intl with no mention of which argument is wrong. Wrap both to name the input. Follow-up, not a publish blocker."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "issue",
+      "note": "swamp_tide_test.ts covers the pure helpers well (16 tests: feed parsing, event mapping, bucketing, profiles, both SVG renderers, markdown). No method/IO path is tested: collect (fetch, non-OK handling, timeout), heatmap (resource + file write), and the global-arg timezone validation are uncovered, as are failure paths. Consistent with the rest of this repo but still a real gap."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "collect re-harvests and overwrites events-current; heatmap is a pure function of its events input and overwrites heatmap-current/report-current. Both are safely re-runnable and neither mutates external state."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "Reads RSS 2.0 from a single endpoint via fast-xml-parser pinned to an exact version (5.11.2); items without a parseable pubDate are dropped rather than coerced, and missing guid falls back to link then a synthesized id. No pagination, rate limiting or auth to handle on a static feed. Minor: no Content-Type check before XML parsing, which degrades to 'zero events' rather than an error."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "The only external resource is one fetch, bounded by AbortSignal.timeout(30s) and read to completion; no sockets, temp files or long-lived handles. Writes go through writeResource/createFileWriter which the runtime owns."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README, LICENSE and the bundled tide-view.mjs use only the public swamp-club feed URL and $HOME/.swamp paths \u2014 no real hostnames, IPs, account IDs or internal topology. tide-view.mjs reads local data only. README examples use only the public swamp-club feed URL and $HOME/.swamp paths."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All six schemas are plain z.object(...) with no .passthrough(); global args and method inputs are re-parsed at the top of each method, so CEL validation works."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "All three specs declare lifetime 30d and garbageCollection 10 \u2014 events, heatmap and the report file."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle behavior: it harvests a public feed and renders analytics, with no create/update/delete/sync surface."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "na",
+      "note": "No mutating or destructive method \u2014 both methods only write their own resources, so there is nothing to gate behind policy/live labels."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "events-current, heatmap-current and report-current are distinct, stable, single-writer instance names; no two methods target the same spec with incompatible shapes."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "No method reads previously stored state (there is no update/delete/sync path); heatmap receives its events through an explicit argument wired by CEL from the collect step."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "manifest 2026.10.15.4 vs model.version 2026.10.15.3 is a workflow-trigger-only bump with zero behavior code delta, so model.version correctly stays put and no upgrade entry is needed. Recorded as intentional in myswamp-jxk4."
+    }
+  ]
+}
