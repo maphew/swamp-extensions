@@ -1157,7 +1157,7 @@ async function showGraph(
 /** Swamp model definition for the beads issue tracker bridge. */
 export const model = {
   type: "@maphew/bd",
-  version: "2026.10.16.1",
+  version: "2026.10.21.1",
   globalArguments: GlobalArgsSchema,
   checks: {
     "bd-usable": {
@@ -1212,6 +1212,12 @@ export const model = {
       toVersion: "2026.10.16.1",
       description:
         "Add prime method and primeContext resource; existing methods and resources unchanged",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.21.1",
+      description:
+        "Make create idempotent on label+title: IssueSchema now carries labels and create returns the existing open issue instead of duplicating; existing resources and methods otherwise unchanged",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

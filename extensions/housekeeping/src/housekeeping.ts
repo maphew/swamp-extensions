@@ -1317,7 +1317,7 @@ const CleanReportSchema = z.object({
 
 export const model = {
   type: "@maphew/housekeeping",
-  version: "2026.10.15.4",
+  version: "2026.10.21.1",
   upgrades: [
     {
       toVersion: "2026.10.15.2",
@@ -1335,6 +1335,12 @@ export const model = {
       toVersion: "2026.10.15.4",
       description:
         "Adversarial-review fixes: entry logging in every method; warn on bd JSON parse failure and on a missing bd binary; report when the default branch cannot be resolved for merged-branch detection; expand default-branch candidates to trunk/develop",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.21.1",
+      description:
+        "Treat `bd orphans --json` null output as an empty list instead of a parse warning; no schema, method, or resource changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
