@@ -134,7 +134,7 @@ const AuditSchema = z.object({
   findings: z.array(FindingSchema),
 });
 
-const GlobalArgsSchema = z.object({
+export const GlobalArgsSchema = z.object({
   projectDir: z.string().default(".").describe(
     "Repository root to audit. Defaults to the current directory so the model stays portable.",
   ),
@@ -222,9 +222,18 @@ async function run(
       stderr: new TextDecoder().decode(output.stderr),
       code: output.code,
     };
-  } catch {
-    return null;
-  }
+   } catch (error) {
+     // Log the failed command for debugging purposes.
+     const cmdStr = cmd.join(" ");
+     const errorMsg = error instanceof Error ? error.message : String(error);
+     const logMsg = `Housekeeping: command failed: ${cmdStr} - ${errorMsg}\n`;
+     try {
+       Deno.stderr.write(new TextEncoder().encode(logMsg));
+     } catch {
+       // Ignore errors in writing to stderr.
+     }
+     return null;
+   }
 }
 
 /** Command stdout on success, otherwise null. */
@@ -507,9 +516,9 @@ async function detectDefaultBranch(
   return "main";
 }
 
-async function checkGit(
-  dir: string,
-  defaultBranch: string,
+export async function checkGit(
+   dir: string,
+   defaultBranch: string,
 ): Promise<{ report: GitReport; findings: Finding[] }> {
   const findings: Finding[] = [];
 
@@ -656,8 +665,8 @@ async function checkGit(
   return { report, findings };
 }
 
-async function checkWorktrees(
-  dir: string,
+export async function checkWorktrees(
+   dir: string,
 ): Promise<{ report: WorktreesReport; findings: Finding[] }> {
   const findings: Finding[] = [];
   const raw = await stdout(["git", "worktree", "list", "--porcelain"], dir);
@@ -720,10 +729,10 @@ async function dirSizeBytes(path: string): Promise<number | null> {
   return null;
 }
 
-async function checkTemp(
-  dir: string,
-  nowMs: number,
-  cfg: GlobalArgs,
+export async function checkTemp(
+   dir: string,
+   nowMs: number,
+   cfg: GlobalArgs,
 ): Promise<{ report: TempReport; findings: Finding[] }> {
   const findings: Finding[] = [];
   const entries: z.infer<typeof TempEntrySchema>[] = [];
@@ -822,11 +831,11 @@ async function checkTemp(
   };
 }
 
-async function checkBeads(
-  dir: string,
-  nowMs: number,
-  cfg: GlobalArgs,
-  logger: Logger,
+export async function checkBeads(
+   dir: string,
+   nowMs: number,
+   cfg: GlobalArgs,
+   logger: Logger,
 ): Promise<{ report: BeadsReport; findings: Finding[] }> {
   const findings: Finding[] = [];
   const present = await pathExists(`${dir}/.beads`);
@@ -1033,23 +1042,21 @@ function tempRootsFor(dir: string, cfg: GlobalArgs): string[] {
 
 // ---------- methods ---------------------------------------------------------
 
-async function doCheck(ctx: ModelContext): Promise<{
-  audit: Audit;
-  git: GitReport;
-  worktrees: WorktreesReport;
-  temp: TempReport | null;
-  beads: BeadsReport | null;
-}> {
-  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
-  const dir = await resolveProjectDir(cfg.projectDir);
-  const nowMs = Date.now();
-  const defaultBranch = await detectDefaultBranch(dir, cfg.defaultBranch);
+async function doCheck(
+   ctx: ModelContext,
+   cfg: GlobalArgs,
+   dir: string,
+): Promise<{
+   audit: Audit;
+   git: GitReport;
+   worktrees: WorktreesReport;
+   temp: TempReport | null;
+   beads: BeadsReport | null;
+ }> {
+   const nowMs = Date.now();
+   const defaultBranch = await detectDefaultBranch(dir, cfg.defaultBranch);
 
-  ctx.logger.info("Housekeeping check starting in {dir}", {
-    dir,
-    beads: cfg.includeBeads,
-    temp: cfg.includeTemp,
-  });
+
 
   const findings: Finding[] = [];
   const git = await checkGit(dir, defaultBranch);
@@ -1091,7 +1098,14 @@ async function check(
   _args: Record<string, never>,
   ctx: ModelContext,
 ): Promise<{ dataHandles: FileHandle[] }> {
-  const result = await doCheck(ctx);
+   const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+   const dir = await resolveProjectDir(cfg.projectDir);
+   ctx.logger.info("Housekeeping check starting in {dir}", {
+     dir,
+     beads: cfg.includeBeads,
+     temp: cfg.includeTemp,
+   });
+   const result = await doCheck(ctx, cfg, dir);
   ctx.logger.info(
     "Housekeeping check: {w} warning(s), {e} error(s)",
     { w: result.audit.warningCount, e: result.audit.errorCount },
