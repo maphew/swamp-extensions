@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/repo-doctor"
-version: 2026.10.15.2
+version: 2026.10.21.1
 description: >-
   Repository hygiene checks for swamp repos — hardcoded absolute home paths in
   model/workflow sources, pulled extensions whose source files are missing, and

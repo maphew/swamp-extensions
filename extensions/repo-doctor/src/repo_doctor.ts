@@ -59,6 +59,28 @@ const GitignoreReportSchema = z.object({
   uncovered: z.array(z.string()),
 });
 
+const ScaffoldingReportSchema = z.object({
+  projectDir: z.string(),
+  denoBin: z.string().nullable().describe(
+    "Resolved deno executable, or null when the check was skipped",
+  ),
+  skipped: z.boolean().describe("True when no deno executable was found"),
+  skipReason: z.string().nullable(),
+  checkedDirs: z.array(z.string()).describe(
+    "Scaffolding dirs that existed and were typechecked",
+  ),
+  missingDirs: z.array(z.string()).describe(
+    "Configured scaffolding dirs absent from this checkout",
+  ),
+  packageRoots: z.array(z.string()).describe(
+    "Package roots deno check ran from, chosen so npm deps resolve",
+  ),
+  checkedFiles: z.number().int(),
+  findings: z.array(FindingSchema),
+  errorCount: z.number().int(),
+  warningCount: z.number().int(),
+});
+
 const ScanReportSchema = z.object({
   projectDir: z.string(),
   healthy: z.boolean(),
@@ -77,6 +99,16 @@ const GlobalArgsSchema = z.object({
   ]).describe("Repo-relative directories scanned for hardcoded absolute paths"),
   includeWorkflows: z.boolean().default(true).describe(
     "Also scan workflows/ for hardcoded absolute paths",
+  ),
+  scaffoldingDirs: z.array(z.string()).default([
+    ".kilo/plugins",
+    ".opencode/plugins",
+    ".pi/extensions",
+  ]).describe(
+    "Repo-relative directories holding generated agent scaffolding to typecheck",
+  ),
+  denoBin: z.string().default("deno").describe(
+    "deno executable used for scaffolding typechecks; falls back to DENO_BIN and ~/.swamp/deno/deno",
   ),
 });
 
@@ -296,6 +328,14 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+async function realPathOf(path: string): Promise<string> {
+  try {
+    return await Deno.realPath(path);
+  } catch {
+    return path.replace(/\/+$/, "") || ".";
+  }
+}
+
 const EXPECTED_IGNORED = [
   ".swamp/bundles/",
   ".swamp/data/",
@@ -347,6 +387,260 @@ async function checkGitignore(
   );
 
   return { gitignorePresent, ignored, expected: EXPECTED_IGNORED, uncovered };
+}
+
+// ---------- scaffolding typecheck -------------------------------------------
+
+// deno-lint-ignore no-control-regex -- matching ANSI colour codes requires the ESC control character
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const DIAG_RE = /^TS(\d+)\s+\[(ERROR|WARN)\]:\s*(.*)$/;
+const AT_RE = /\bat (file:\/\/\S+?):(\d+):(\d+)\b/;
+const SCAFFOLDING_SOURCE_RE = /\.(ts|tsx|mts|cts)$/;
+
+/** Strip ANSI colour codes so deno's pretty diagnostics parse deterministically. */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, "");
+}
+
+/** Only TypeScript sources are typechecked; skip maps, markdown, and d.ts. */
+export function isScaffoldingSource(path: string): boolean {
+  if (path.endsWith(".d.ts")) return false;
+  return SCAFFOLDING_SOURCE_RE.test(path);
+}
+
+/** `file:///home/u/repo/x.ts` -> `/home/u/repo/x.ts` (no node: dependency). */
+function fileUrlToPath(url: string): string {
+  let path = url.replace(/^file:\/\//, "");
+  if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+function dirOf(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const i = trimmed.lastIndexOf("/");
+  return i <= 0 ? "/" : trimmed.slice(0, i);
+}
+
+/**
+ * Parse `deno check` diagnostics into findings.
+ *
+ * Deno prints each diagnostic as a `TS<code> [ERROR|WARN]: <message>` header
+ * optionally followed by a code snippet and an `at file://<path>:<line>:<col>`
+ * location. We pair each header with the next location line and ignore the
+ * snippet, which varies in shape between deno versions.
+ */
+export function parseDenoCheckOutput(
+  raw: string,
+  projectDir: string,
+): Finding[] {
+  const findings: Finding[] = [];
+  let pending:
+    | { code: string; severity: "error" | "warning"; message: string }
+    | null = null;
+
+  for (const rawLine of stripAnsi(raw).split("\n")) {
+    const diag = DIAG_RE.exec(rawLine);
+    if (diag) {
+      pending = {
+        code: `TS${diag[1]}`,
+        severity: diag[2] === "ERROR" ? "error" : "warning",
+        message: diag[3].trim(),
+      };
+      continue;
+    }
+    if (!pending) continue;
+    const at = AT_RE.exec(rawLine);
+    if (!at) continue;
+    findings.push({
+      check: "scaffolding-typecheck",
+      severity: pending.severity,
+      file: relative(projectDir, fileUrlToPath(at[1])),
+      line: Number(at[2]),
+      message: `${pending.code}: ${pending.message}`,
+      detail: null,
+    });
+    pending = null;
+  }
+  return findings;
+}
+
+async function collectScaffoldingFiles(dirAbs: string): Promise<string[]> {
+  const files: string[] = [];
+  for await (const abs of walk(dirAbs)) {
+    if (isScaffoldingSource(abs)) files.push(abs);
+  }
+  files.sort();
+  return files;
+}
+
+/**
+ * Walk up from a scaffolding dir to the nearest package root so `deno check`
+ * resolves npm deps (e.g. `@kilocode/plugin` in `.kilo/node_modules`) from the
+ * same context the plugin actually loads in.
+ */
+async function nearestPackageRoot(
+  startAbs: string,
+  projectDir: string,
+): Promise<string> {
+  const root = projectDir.replace(/\/+$/, "");
+  let dir = startAbs.replace(/\/+$/, "");
+  while (dir.length >= root.length) {
+    for (const marker of ["package.json", "deno.json", "deno.jsonc"]) {
+      if (await exists(`${dir}/${marker}`)) return dir;
+    }
+    if (dir === root) break;
+    const parent = dirOf(dir);
+    if (parent === dir || !parent.startsWith(root)) break;
+    dir = parent;
+  }
+  return root || ".";
+}
+
+async function resolveDenoBin(explicit: string): Promise<string | null> {
+  const home = Deno.env.get("HOME") ?? "";
+  const candidates: string[] = [];
+  for (
+    const candidate of [
+      explicit,
+      Deno.env.get("DENO_BIN") ?? "",
+      "deno",
+      `${home}/.swamp/deno/deno`,
+    ]
+  ) {
+    if (candidate && !candidates.includes(candidate)) {
+      candidates.push(candidate);
+    }
+  }
+  for (const bin of candidates) {
+    if (bin.includes("/") && !(await exists(bin))) continue;
+    try {
+      const out = await new Deno.Command(bin, {
+        args: ["--version"],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      if (out.code === 0) return bin;
+    } catch {
+      // candidate not on PATH or not executable; try the next
+    }
+  }
+  return null;
+}
+
+async function runDenoCheck(
+  denoBin: string,
+  cwd: string,
+  files: string[],
+): Promise<{ code: number; stderr: string }> {
+  const command = new Deno.Command(denoBin, {
+    args: ["check", ...files],
+    cwd,
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const output = await command.output();
+  return {
+    code: output.code,
+    stderr: new TextDecoder().decode(output.stderr) +
+      new TextDecoder().decode(output.stdout),
+  };
+}
+
+async function checkScaffolding(
+  ctx: ModelContext,
+): Promise<z.infer<typeof ScaffoldingReportSchema>> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const empty = {
+    projectDir: cfg.projectDir,
+    denoBin: null,
+    skipped: true,
+    checkedDirs: [] as string[],
+    missingDirs: [] as string[],
+    packageRoots: [] as string[],
+    checkedFiles: 0,
+    findings: [] as Finding[],
+    errorCount: 0,
+    warningCount: 0,
+  };
+
+  const denoBin = await resolveDenoBin(cfg.denoBin);
+  if (!denoBin) {
+    const skipReason =
+      "deno executable not found (set denoBin or DENO_BIN, or install ~/.swamp/deno/deno)";
+    ctx.logger.warn("Scaffolding typecheck skipped: {reason}", {
+      reason: skipReason,
+    });
+    return { ...empty, skipReason };
+  }
+
+  const findings: Finding[] = [];
+  const checkedDirs: string[] = [];
+  const missingDirs: string[] = [];
+  const packageRoots: string[] = [];
+  let checkedFiles = 0;
+
+  const projectAbs = await realPathOf(cfg.projectDir);
+
+  for (const dir of cfg.scaffoldingDirs) {
+    const dirAbs = `${projectAbs}/${dir}`;
+    if (!(await exists(dirAbs))) {
+      missingDirs.push(dir);
+      continue;
+    }
+    const files = await collectScaffoldingFiles(dirAbs);
+    if (files.length === 0) {
+      missingDirs.push(dir);
+      continue;
+    }
+    checkedDirs.push(dir);
+    checkedFiles += files.length;
+
+    const packageRoot = await nearestPackageRoot(dirAbs, projectAbs);
+    if (!packageRoots.includes(packageRoot)) packageRoots.push(packageRoot);
+
+    const result = await runDenoCheck(denoBin, packageRoot, files);
+    const parsed = parseDenoCheckOutput(result.stderr, projectAbs);
+    if (result.code !== 0 && parsed.length === 0) {
+      findings.push({
+        check: "scaffolding-typecheck",
+        severity: "error",
+        file: dir,
+        line: null,
+        message: `deno check failed for ${dir} (exit ${result.code})`,
+        detail: result.stderr.trim().split("\n").slice(-3).join("\n") || null,
+      });
+    } else {
+      findings.push(...parsed);
+    }
+  }
+
+  const report: z.infer<typeof ScaffoldingReportSchema> = {
+    projectDir: cfg.projectDir,
+    denoBin,
+    skipped: false,
+    skipReason: null,
+    checkedDirs,
+    missingDirs,
+    packageRoots,
+    checkedFiles,
+    findings,
+    errorCount: findings.filter((f) => f.severity === "error").length,
+    warningCount: findings.filter((f) => f.severity === "warning").length,
+  };
+
+  ctx.logger.info(
+    "Scaffolding typecheck: {files} file(s) in {dirs} dir(s), {e} error(s)",
+    {
+      files: checkedFiles,
+      dirs: checkedDirs.length,
+      e: report.errorCount,
+    },
+  );
+  return report;
 }
 
 /** Render a scan report as markdown, grouped by severity. */
@@ -454,7 +748,7 @@ async function scan(
 
 export const model = {
   type: "@maphew/repo-doctor",
-  version: "2026.10.14.2",
+  version: "2026.10.21.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -467,6 +761,12 @@ export const model = {
       toVersion: "2026.10.14.2",
       description:
         "Fix checkExtensions crashing on a pulled extension with no files/ tree, and verify declared additionalFiles instead of a dead no-op loop",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.21.1",
+      description:
+        "Add checkScaffolding: deno check over generated agent scaffolding (.kilo/plugins, .opencode/plugins, .pi/extensions) with scaffoldingDirs and denoBin global args; no change to existing args or resources",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -492,6 +792,13 @@ export const model = {
     gitignore: {
       description: ".gitignore coverage of generated .swamp artifacts",
       schema: GitignoreReportSchema,
+      lifetime: "7d" as const,
+      garbageCollection: 10,
+    },
+    scaffolding: {
+      description:
+        "Typecheck findings for generated agent scaffolding, separate from project-owned code",
+      schema: ScaffoldingReportSchema,
       lifetime: "7d" as const,
       garbageCollection: 10,
     },
@@ -550,6 +857,23 @@ export const model = {
         const handle = await ctx.writeResource(
           "gitignore",
           "gitignore-current",
+          report,
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    checkScaffolding: {
+      description:
+        "Typecheck generated agent scaffolding (.kilo/plugins, .opencode/plugins, .pi/extensions)",
+      arguments: z.object({}),
+      execute: async (
+        _args: Record<string, never>,
+        ctx: ModelContext,
+      ): Promise<{ dataHandles: Array<{ name: string }> }> => {
+        const report = await checkScaffolding(ctx);
+        const handle = await ctx.writeResource(
+          "scaffolding",
+          "scaffolding-current",
           report,
         );
         return { dataHandles: [handle] };

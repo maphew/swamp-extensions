@@ -23,12 +23,12 @@ swamp model create @maphew/repo-doctor repo-doctor
 
 ## Methods
 
-| Method            | Purpose                                                     |
-| ----------------- | ----------------------------------------------------------- |
-| `scan`            | Run every check and write a combined markdown report         |
-| `findPaths`       | Hardcoded absolute-path findings only                        |
-| `checkExtensions` | Pulled-extension source integrity only                       |
-| `checkGitignore`  | `.swamp/` gitignore coverage only                            |
+| Method            | Purpose                                              |
+| ----------------- | ---------------------------------------------------- |
+| `scan`            | Run every check and write a combined markdown report |
+| `findPaths`       | Hardcoded absolute-path findings only                |
+| `checkExtensions` | Pulled-extension source integrity only               |
+| `checkGitignore`  | `.swamp/` gitignore coverage only                    |
 
 ```bash
 # Full audit
@@ -55,8 +55,8 @@ Global arguments (per model instance):
 
 ## Output
 
-- `scan-current` — combined report: `healthy`, `errorCount`, `warningCount`,
-  and every finding (check, severity, file, line, message, detail)
+- `scan-current` — combined report: `healthy`, `errorCount`, `warningCount`, and
+  every finding (check, severity, file, line, message, detail)
 - `paths-current` — hardcoded absolute-path findings
 - `extensions-current` — pulled-extension integrity
 - `gitignore-current` — `.swamp/` gitignore coverage
