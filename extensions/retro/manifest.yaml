@@ -1,0 +1,25 @@
+manifestVersion: 1
+name: "@maphew/retro"
+version: "2026.10.11.1"
+description: "Agent-session retrospective — mine Claude Code, Codex, and Amp transcripts into an evidence-backed, cumulative findings register."
+repository: "https://github.com/maphew/swamp-extensions.git"
+paths:
+  base: manifest
+models:
+  - src/retro.ts
+additionalFiles:
+  - README.md
+  - LICENSE
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+  - darwin-x86_64
+  - darwin-aarch64
+labels:
+  - retrospective
+  - sessions
+  - transcripts
+  - claude-code
+  - codex
+  - improvement
+dependencies: []

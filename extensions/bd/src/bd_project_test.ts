@@ -235,7 +235,11 @@ Deno.test("@maphew/bd query flags truncation and passes limit", async () => {
   try {
     const ctx = makeCtx(dir);
     for (let i = 0; i < 3; i++) {
-      await runMethod("create", { title: `query cap probe ${i}`, type: "task" }, ctx);
+      await runMethod(
+        "create",
+        { title: `query cap probe ${i}`, type: "task" },
+        ctx,
+      );
     }
 
     ctx.written.clear();
@@ -350,7 +354,11 @@ Deno.test("@maphew/bd dep add/list/remove round-trip", async () => {
     const ctx = makeCtx(dir);
     await runMethod("create", { title: "dependent issue", type: "bug" }, ctx);
     const aId = [...ctx.written.values()].at(-1)!.id as string;
-    await runMethod("create", { title: "prerequisite issue", type: "task" }, ctx);
+    await runMethod(
+      "create",
+      { title: "prerequisite issue", type: "task" },
+      ctx,
+    );
     const bId = [...ctx.written.values()].at(-1)!.id as string;
 
     ctx.written.clear();
@@ -372,7 +380,11 @@ Deno.test("@maphew/bd dep add/list/remove round-trip", async () => {
     assertEquals(listedDown[0].id, bId);
 
     ctx.written.clear();
-    await runMethod("dep", { action: "list", issueId: bId, direction: "up" }, ctx);
+    await runMethod(
+      "dep",
+      { action: "list", issueId: bId, direction: "up" },
+      ctx,
+    );
     const listedUp = [...ctx.written.values()];
     assertEquals(listedUp.length, 1);
     assertEquals(listedUp[0].id, aId);
@@ -405,12 +417,15 @@ Deno.test("@maphew/bd dep rejects cycles and requires dependsOnId", async () => 
     const bId = [...ctx.written.values()].at(-1)!.id as string;
 
     assertThrows(
-      () =>
-        model.methods.dep.arguments.parse({ action: "add", issueId: aId }),
+      () => model.methods.dep.arguments.parse({ action: "add", issueId: aId }),
       "dependsOnId",
     );
 
-    await runMethod("dep", { action: "add", issueId: aId, dependsOnId: bId }, ctx);
+    await runMethod(
+      "dep",
+      { action: "add", issueId: aId, dependsOnId: bId },
+      ctx,
+    );
     let caught: unknown;
     try {
       await runMethod(
@@ -489,8 +504,16 @@ Deno.test("@maphew/bd graph returns nodes, typed edges, and layers", async () =>
     await runMethod("create", { title: "graph tip", type: "task" }, ctx);
     const cId = [...ctx.written.values()].at(-1)!.id as string;
     // c depends on b, b depends on a
-    await runMethod("dep", { action: "add", issueId: bId, dependsOnId: aId }, ctx);
-    await runMethod("dep", { action: "add", issueId: cId, dependsOnId: bId }, ctx);
+    await runMethod(
+      "dep",
+      { action: "add", issueId: bId, dependsOnId: aId },
+      ctx,
+    );
+    await runMethod(
+      "dep",
+      { action: "add", issueId: cId, dependsOnId: bId },
+      ctx,
+    );
 
     ctx.written.clear();
     await runMethod("graph", { rootId: cId }, ctx);
@@ -552,15 +575,21 @@ Deno.test("@maphew/bd graph returns nodes, typed edges, and layers", async () =>
       (n) => n.id,
     );
     assertEquals(nodeIds.length, 3);
-    assert(nodeIds.includes(dId) && nodeIds.includes(bId) && nodeIds.includes(aId));
+    assert(
+      nodeIds.includes(dId) && nodeIds.includes(bId) && nodeIds.includes(aId),
+    );
     assert(!nodeIds.includes(cId));
     const downEdges = downFromD.edges as Array<Record<string, unknown>>;
     assertEquals(downEdges.length, 2);
     assert(
-      downEdges.some((e) => e.from === dId && e.to === bId && e.type === "tracks"),
+      downEdges.some((e) =>
+        e.from === dId && e.to === bId && e.type === "tracks"
+      ),
     );
     assert(
-      downEdges.some((e) => e.from === bId && e.to === aId && e.type === "blocks"),
+      downEdges.some((e) =>
+        e.from === bId && e.to === aId && e.type === "blocks"
+      ),
     );
 
     // all-open mode has no root and no layers and carries every typed edge
@@ -681,6 +710,40 @@ Deno.test("@maphew/bd prime leaves an implicit profile null", async () => {
     const ctx = makeCtx(dir);
     await runMethod("prime", {}, ctx);
     assertEquals(ctx.written.get("prime-current")!.profile, null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("@maphew/bd create dedups on label+title", async () => {
+  const dir = await makeProject();
+  try {
+    const ctx = makeCtx(dir);
+    const first = await runMethod("create", {
+      title: "CI health: failed runs on maphew/mdo",
+      type: "bug",
+      priority: 1,
+      labels: ["repo-ci-health"],
+    }, ctx);
+    assertEquals(first.dataHandles?.length, 1);
+    const firstId = [...ctx.written.values()].at(-1)!.id as string;
+
+    ctx.written.clear();
+    // Same label set + title must not create a second issue; it must return
+    // the existing one. This is the idempotency guard the workflow relies on.
+    const second = await runMethod("create", {
+      title: "CI health: failed runs on maphew/mdo",
+      type: "bug",
+      priority: 1,
+      labels: ["repo-ci-health"],
+    }, ctx);
+    assertEquals(second.dataHandles?.length, 1);
+    assertEquals([...ctx.written.values()][0].id, firstId);
+
+    ctx.written.clear();
+    const listed = await runMethod("list", { limit: 10 }, ctx);
+    assertEquals(listed.dataHandles?.length, 1);
+    assertEquals([...ctx.written.values()][0].labels, ["repo-ci-health"]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

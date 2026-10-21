@@ -45,6 +45,7 @@ const IssueSchema = z.object({
   dependencyCount: z.number().int().default(0),
   dependentCount: z.number().int().default(0),
   commentCount: z.number().int().default(0),
+  labels: z.array(z.string()).default([]),
   truncated: z.boolean().default(false),
 });
 
@@ -376,6 +377,9 @@ function normalizeIssue(
     dependencyCount: Number(raw.dependency_count ?? 0),
     dependentCount: Number(raw.dependent_count ?? 0),
     commentCount: Number(raw.comment_count ?? 0),
+    labels: Array.isArray(raw.labels)
+      ? (raw.labels as unknown[]).map(String)
+      : [],
     truncated: false,
   };
 }
@@ -607,12 +611,76 @@ async function showIssue(
   return { dataHandles: [handle] };
 }
 
+/**
+ * Find an existing open issue carrying all of `labels` and matching `title`.
+ *
+ * Used by `create` as its idempotency guard: bd has no durable action-marker
+ * resource like swamp's `writeResource`, so the dedup key is the caller's own
+ * (label, title, status=open) tuple. Returns the normalized issue or null.
+ */
+async function findIssueByLabelAndTitle(
+  cfg: GlobalArgs,
+  labels: string[],
+  title: string,
+  ctx: {
+    logger: {
+      error: (msg: string, props?: Record<string, unknown>) => void;
+    };
+  },
+): Promise<Issue | null> {
+  const { stdout } = await runBdStrict(
+    "create-dedup-list",
+    cfg.bdCommand,
+    ["list", "--json", "--limit", "500", "--label", labels.join(",")],
+    cfg.bdDir,
+    ctx.logger,
+  );
+
+  const all = (JSON.parse(stdout) as Record<string, unknown>[])
+    .map((raw) =>
+      normalizeIssue(raw, cfg, { status: "open", issueType: cfg.defaultType })
+    );
+  return (
+    all.find(
+      (i) =>
+        i.status === "open" && i.title === title &&
+        labels.every((l) => i.labels.includes(l)),
+    ) ?? null
+  );
+}
+
 async function createIssue(
   args: Record<string, unknown>,
   ctx: MethodCtx,
 ): Promise<{ dataHandles: Array<{ name: string }> }> {
   const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
   const parsed = CreateArgsSchema.parse(args);
+
+  // Idempotency guard: if a label set was provided, look for an existing open
+  // issue with the same title under that label and skip creation. bd has no
+  // durable action-marker resource like swamp's writeResource, so the dedup
+  // key is (label, title, status=open) — the same shape the caller controls.
+  // Callers that want per-fire uniqueness should vary the title.
+  if (parsed.labels && parsed.labels.length > 0) {
+    const existing = await findIssueByLabelAndTitle(
+      cfg,
+      parsed.labels,
+      parsed.title,
+      ctx,
+    );
+    if (existing) {
+      ctx.logger.info(
+        "Skipped bd create: existing open issue {id} matches label+title",
+        { id: existing.id },
+      );
+      const handle = await ctx.writeResource(
+        "issue",
+        `issue-${existing.id}`,
+        existing,
+      );
+      return { dataHandles: [handle] };
+    }
+  }
 
   const bdArgs = [
     "create",
