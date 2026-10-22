@@ -150,6 +150,10 @@ interface DispatchResult {
   exitCode: number;
   /** True when the agent exited zero. */
   success: boolean;
+  /** Sandbox worktree created for this dispatch, or null when it ran in the mapped checkout. */
+  sandbox: string | null;
+  /** True when a sandbox was created and removed after a successful run. */
+  sandboxRemoved: boolean;
   /** Agent stdout. */
   stdout: string;
   /** Agent stderr, or the preflight failure. */
@@ -170,6 +174,12 @@ const DispatchResultSchema = z.object({
   durationMs: z.number().int().describe("Wall-clock duration in milliseconds"),
   exitCode: z.number().int().describe("Agent exit code"),
   success: z.boolean().describe("True when the agent exited zero"),
+  sandbox: z.string().nullable().default(null).describe(
+    "Sandbox worktree created for this dispatch, or null when it ran in the mapped checkout",
+  ),
+  sandboxRemoved: z.boolean().default(false).describe(
+    "True when a sandbox was created and removed after a successful run",
+  ),
   stdout: z.string().describe("Agent stdout"),
   stderr: z.string().describe("Agent stderr, or the preflight failure"),
 });
@@ -218,6 +228,135 @@ const SweepSummarySchema = z.object({
   results: z.array(SweepRowSchema).describe("Per-candidate outcome"),
 });
 
+/** One worktree found under a sandbox root. */
+export interface SandboxInfo {
+  /** Worktree path. */
+  path: string;
+  /** Main checkout the worktree was added from. */
+  source: string;
+  /** Branch checked out in the worktree. */
+  branch: string;
+  /** Base branch the worktree is compared against. */
+  base: string;
+  /** True when the worktree has uncommitted changes. */
+  dirty: boolean;
+  /** Commits on the branch that are not on `origin/<base>`. */
+  ahead: number;
+  /** True when HEAD is already an ancestor of `origin/<base>`. */
+  merged: boolean;
+  /** Pull request state from `gh` (OPEN, CLOSED, MERGED), or null when unknown. */
+  prState: string | null;
+  /** True when pruneSandboxes would remove it. */
+  removable: boolean;
+  /** Why it is not removable, or null when it is. */
+  reason: string | null;
+}
+
+const SandboxInfoSchema = z.object({
+  path: z.string().describe("Worktree path"),
+  source: z.string().describe("Main checkout the worktree was added from"),
+  branch: z.string().describe("Branch checked out in the worktree"),
+  base: z.string().describe("Base branch the worktree is compared against"),
+  dirty: z.boolean().describe("True when the worktree has uncommitted changes"),
+  ahead: z.number().int().describe(
+    "Commits on the branch that are not on origin/<base>",
+  ),
+  merged: z.boolean().describe(
+    "True when HEAD is already an ancestor of origin/<base>",
+  ),
+  prState: z.string().nullable().describe(
+    "Pull request state from gh, or null when unknown",
+  ),
+  removable: z.boolean().describe("True when pruneSandboxes would remove it"),
+  reason: z.string().nullable().describe(
+    "Why it is not removable, or null when it is",
+  ),
+});
+
+/** The read-only sandbox listing. */
+export interface SandboxListing {
+  /** Root that was scanned. */
+  sandboxRoot: string;
+  /** ISO-8601 scan timestamp. */
+  scannedAt: string;
+  /** Worktrees found under the root. */
+  sandboxes: SandboxInfo[];
+}
+
+const SandboxListingSchema = z.object({
+  sandboxRoot: z.string().describe("Root that was scanned"),
+  scannedAt: z.string().describe("ISO-8601 scan timestamp"),
+  sandboxes: z.array(SandboxInfoSchema).describe(
+    "Worktrees found under the root",
+  ),
+});
+
+/** Outcome of a sandbox prune. */
+export interface SandboxPrune {
+  /** Root that was scanned. */
+  sandboxRoot: string;
+  /** True when nothing was removed. */
+  dryRun: boolean;
+  /** ISO-8601 scan timestamp. */
+  scannedAt: string;
+  /** Worktrees considered. */
+  scanned: number;
+  /** Paths removed (or that would be removed on a dry run). */
+  removed: string[];
+  /** Paths left in place, with the reason. */
+  kept: Array<{ path: string; reason: string }>;
+  /** True when `git worktree prune` was run against every source repo. */
+  pruned: boolean;
+}
+
+const SandboxPruneSchema = z.object({
+  sandboxRoot: z.string().describe("Root that was scanned"),
+  dryRun: z.boolean().describe("True when nothing was removed"),
+  scannedAt: z.string().describe("ISO-8601 scan timestamp"),
+  scanned: z.number().int().describe("Worktrees considered"),
+  removed: z.array(z.string()).describe(
+    "Paths removed (or that would be removed on a dry run)",
+  ),
+  kept: z.array(z.object({
+    path: z.string(),
+    reason: z.string(),
+  })).describe("Paths left in place, with the reason"),
+  pruned: z.boolean().describe(
+    "True when git worktree prune was run against every source repo",
+  ),
+});
+
+/** Arguments for the `sandboxes` method. */
+const SandboxesArgsSchema = z.object({
+  sandboxRoot: z.string().min(1).describe(
+    "Directory that holds sandbox worktrees, one per dispatch",
+  ),
+  base: z.string().default("").describe(
+    "Base branch to compare against; empty detects origin/HEAD, falling back to main",
+  ),
+  gitCommand: z.string().default("git").describe("Path to the git CLI"),
+  ghCommand: z.string().default("gh").describe(
+    "Path to the GitHub CLI, used to read PR state; a missing gh is not an error",
+  ),
+});
+
+/** Arguments for the `pruneSandboxes` method. */
+const PruneSandboxesArgsSchema = z.object({
+  sandboxRoot: z.string().min(1).describe(
+    "Directory that holds sandbox worktrees, one per dispatch",
+  ),
+  dryRun: z.boolean().default(true).describe(
+    "Report what would be removed without removing anything",
+  ),
+  base: z.string().default("").describe(
+    "Base branch to compare against; empty detects origin/HEAD, falling back to main",
+  ),
+  gitCommand: z.string().default("git").describe("Path to the git CLI"),
+  ghCommand: z.string().default("gh").describe(
+    "Path to the GitHub CLI, used to read PR state; a missing gh is not an error",
+  ),
+});
+
 /** Arguments for the `filterQueue` method. */
 const FilterArgsSchema = z.object({
   workdirMap: z.preprocess(
@@ -249,6 +388,12 @@ const DispatchArgsSchema = z.object({
   ),
   issueId: z.string().optional().describe(
     "Bead id the task belongs to, for result naming and reporting",
+  ),
+  sandboxRoot: z.string().default("").describe(
+    "Create a git worktree per dispatch under this root instead of running in the checkout; empty keeps the direct-checkout behaviour",
+  ),
+  keepSandbox: z.boolean().default(false).describe(
+    "Keep the sandbox worktree even after a successful run (failed runs are always kept)",
   ),
   gitCommand: z.string().default("git").describe("Path to the git CLI"),
 });
@@ -287,6 +432,12 @@ const RunResultSchema = z.object({
 const SweepArgsSchema = z.object({
   candidates: z.array(CandidateSchema).default([]).describe(
     "Candidates from filterQueue (wire from data.latest(...).attributes.candidates)",
+  ),
+  sandboxRoot: z.string().default("").describe(
+    "Create a git worktree per candidate under this root; empty uses each candidate's mapped checkout",
+  ),
+  keepSandbox: z.boolean().default(false).describe(
+    "Keep sandbox worktrees even after a successful run (failed runs are always kept)",
   ),
   gitCommand: z.string().default("git").describe("Path to the git CLI"),
 });
@@ -428,6 +579,58 @@ export function sanitizeInstanceName(value: string): string {
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return cleaned || "unknown";
+}
+
+/** The directory name a dispatch's worktree gets under its sandbox root. */
+export function sandboxNameFor(
+  sourceWorkdir: string,
+  issueId: string,
+): string {
+  const trimmed = sourceWorkdir.replace(/\/+$/, "");
+  const repo = trimmed.slice(trimmed.lastIndexOf("/") + 1) || "repo";
+  return `${repo}-${sanitizeInstanceName(issueId || "task")}`;
+}
+
+/**
+ * Resolve `<sandboxRoot>/<repo>-<id>`. A relative root is resolved against the
+ * source checkout, so `../.worktrees` means "beside the repo" regardless of
+ * where swamp was invoked.
+ */
+export function sandboxPathFor(
+  sandboxRoot: string,
+  sourceWorkdir: string,
+  issueId: string,
+): string {
+  const root = sandboxRoot.startsWith("/")
+    ? sandboxRoot
+    : `${sourceWorkdir.replace(/\/+$/, "")}/${sandboxRoot}`;
+  return `${root.replace(/\/+$/, "")}/${
+    sandboxNameFor(sourceWorkdir, issueId)
+  }`;
+}
+
+/**
+ * Whether a clean sandbox is safe to prune: merged into the base, or its PR is
+ * closed/merged. Dirty worktrees are never removable, and an unknown PR state
+ * is not evidence of closure.
+ */
+export function sandboxVerdict(opts: {
+  dirty: boolean;
+  merged: boolean;
+  prState: string | null;
+}): { removable: boolean; reason: string | null } {
+  if (opts.dirty) {
+    return { removable: false, reason: "uncommitted changes" };
+  }
+  if (opts.merged) return { removable: true, reason: null };
+  const state = opts.prState?.toUpperCase() ?? null;
+  if (state === "MERGED" || state === "CLOSED") {
+    return { removable: true, reason: null };
+  }
+  return {
+    removable: false,
+    reason: state ? `PR is ${state.toLowerCase()}` : "branch not merged",
+  };
 }
 
 /** Build the agent task prompt for a ready issue. */
@@ -718,6 +921,192 @@ async function branchConflict(
   return null;
 }
 
+// ---------- sandbox helpers -------------------------------------------------
+
+/** Create the worktree for one dispatch, preflighting the branch first. */
+async function createSandbox(
+  candidate: Candidate,
+  path: string,
+  deps: DispatchDeps,
+): Promise<void> {
+  const source: GitContext = {
+    gitCommand: deps.gitCommand,
+    workdir: candidate.workdir,
+    signal: deps.signal,
+  };
+  const inside = await git(source, ["rev-parse", "--is-inside-work-tree"]);
+  if (!inside.success || inside.stdout.trim() !== "true") {
+    throw new Error(`Not a git checkout: ${candidate.workdir}`);
+  }
+  const conflict = await branchConflict(
+    deps.gitCommand,
+    candidate.workdir,
+    candidate.branch,
+    deps.signal,
+  );
+  if (conflict) throw new Error(conflict);
+  try {
+    const stat = await Deno.stat(path);
+    if (stat) {
+      throw new Error(`Sandbox path already exists: ${path}`);
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await gitStrict(source, ["fetch", "origin"]);
+  await gitStrict(source, [
+    "worktree",
+    "add",
+    "-b",
+    candidate.branch,
+    path,
+    `origin/${candidate.base}`,
+  ]);
+}
+
+/** Remove one sandbox after a successful run, refusing to discard uncommitted work. */
+async function removeSandbox(
+  path: string,
+  sourceWorkdir: string,
+  deps: DispatchDeps,
+): Promise<void> {
+  await gitStrict(
+    {
+      gitCommand: deps.gitCommand,
+      workdir: sourceWorkdir,
+      signal: deps.signal,
+    },
+    ["worktree", "remove", path],
+  );
+}
+
+/** Directory name from an absolute or relative path. */
+function dirName(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const slash = trimmed.lastIndexOf("/");
+  return slash > 0 ? trimmed.slice(0, slash) : "/";
+}
+
+/** Resolve the branch a sandbox should be compared against. */
+async function detectBase(
+  gitCommand: string,
+  workdir: string,
+  explicit: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (explicit) return explicit;
+  const ctx: GitContext = { gitCommand, workdir, signal };
+  const remoteHead = await git(ctx, [
+    "symbolic-ref",
+    "--short",
+    "refs/remotes/origin/HEAD",
+  ]);
+  const ref = remoteHead.stdout.trim();
+  if (remoteHead.success && ref.startsWith("origin/")) {
+    return ref.slice("origin/".length);
+  }
+  return "main";
+}
+
+/** Read a PR's state for `branch`, or null when gh cannot answer. */
+async function ghPrState(
+  ghCommand: string,
+  workdir: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  if (!branch || branch === "HEAD") return null;
+  const result = await runCommand(
+    ghCommand,
+    ["pr", "view", branch, "--json", "state", "--jq", ".state"],
+    { cwd: workdir, signal },
+  );
+  if (!result.success) return null;
+  const state = result.stdout.trim().toUpperCase();
+  return state || null;
+}
+
+/** Inspect one directory as a sandbox worktree. */
+async function inspectSandbox(
+  path: string,
+  opts: {
+    base: string;
+    gitCommand: string;
+    ghCommand: string;
+    signal?: AbortSignal;
+  },
+): Promise<SandboxInfo | null> {
+  const ctx: GitContext = {
+    gitCommand: opts.gitCommand,
+    workdir: path,
+    signal: opts.signal,
+  };
+  const inside = await git(ctx, ["rev-parse", "--is-inside-work-tree"]);
+  if (!inside.success || inside.stdout.trim() !== "true") return null;
+
+  const branchResult = await git(ctx, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const branch = branchResult.stdout.trim() || "HEAD";
+  const common = await git(ctx, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  const source = common.success ? dirName(common.stdout.trim()) : "";
+  const base = await detectBase(
+    opts.gitCommand,
+    path,
+    opts.base,
+    opts.signal,
+  );
+  const status = await git(ctx, ["status", "--porcelain"]);
+  const dirty = status.success && status.stdout.trim() !== "";
+  const aheadResult = await git(ctx, [
+    "rev-list",
+    "--count",
+    `origin/${base}..HEAD`,
+  ]);
+  const ahead = aheadResult.success
+    ? Number(aheadResult.stdout.trim()) || 0
+    : 0;
+  const merged =
+    (await git(ctx, ["merge-base", "--is-ancestor", "HEAD", `origin/${base}`]))
+      .code === 0;
+  const prState = await ghPrState(
+    opts.ghCommand,
+    path,
+    branch,
+    opts.signal,
+  );
+  const verdict = sandboxVerdict({ dirty, merged, prState });
+  return {
+    path,
+    source,
+    branch,
+    base,
+    dirty,
+    ahead,
+    merged,
+    prState,
+    removable: verdict.removable,
+    reason: verdict.reason,
+  };
+}
+
+/** List candidate sandbox directories under a root, one level deep. */
+async function listSandboxDirs(sandboxRoot: string): Promise<string[]> {
+  const dirs: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(sandboxRoot)) {
+      if (!entry.isDirectory || entry.name.startsWith(".")) continue;
+      dirs.push(`${sandboxRoot.replace(/\/+$/, "")}/${entry.name}`);
+    }
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+  return dirs.sort();
+}
+
 // ---------- dispatch core ---------------------------------------------------
 
 interface Logger {
@@ -793,10 +1182,17 @@ async function setupBranch(
   await gitStrict(ctx, ["checkout", "-b", candidate.branch]);
 }
 
+/** Options that turn dispatch into a worktree minting operation. */
+interface SandboxOptions {
+  sandboxRoot: string;
+  keepSandbox: boolean;
+}
+
 /** Run one agent dispatch, returning a result even when preflight fails. */
 async function dispatchOne(
   candidate: Candidate,
   deps: DispatchDeps,
+  sandboxOpts?: SandboxOptions,
 ): Promise<DispatchResult> {
   const startedAt = new Date().toISOString();
   const actor = actorFor(candidate.agent, candidate.branch);
@@ -804,6 +1200,10 @@ async function dispatchOne(
   let stderr = "";
   let exitCode = 1;
   let success = false;
+  let sandbox: string | null = null;
+  let created = false;
+  let sandboxRemoved = false;
+  let runCandidate = candidate;
 
   try {
     if (candidate.branch === candidate.base) {
@@ -811,17 +1211,32 @@ async function dispatchOne(
         `branch must differ from base (both are '${candidate.base}')`,
       );
     }
+    if (sandboxOpts?.sandboxRoot) {
+      sandbox = sandboxPathFor(
+        sandboxOpts.sandboxRoot,
+        candidate.workdir,
+        candidate.id || candidate.branch,
+      );
+      deps.logger.info("Creating sandbox {sandbox} from {source}", {
+        sandbox,
+        source: candidate.workdir,
+      });
+      await createSandbox(candidate, sandbox, deps);
+      created = true;
+      runCandidate = { ...candidate, workdir: sandbox };
+    } else {
+      await setupBranch(candidate, deps);
+    }
+
     deps.logger.info("Dispatching {agent} on {branch} in {workdir}", {
       agent: candidate.agent,
       branch: candidate.branch,
-      workdir: candidate.workdir,
+      workdir: runCandidate.workdir,
     });
-    await setupBranch(candidate, deps);
-
     const result = await runAgentProcess({
       prompt: candidate.task,
-      systemPrompt: runnerInstruction(candidate),
-      workdir: candidate.workdir,
+      systemPrompt: runnerInstruction(runCandidate),
+      workdir: runCandidate.workdir,
       agent: candidate.agent,
       actor,
     }, deps);
@@ -845,10 +1260,34 @@ async function dispatchOne(
     });
   }
 
+  if (created && sandbox) {
+    if (!success) {
+      deps.logger.warn(
+        "Sandbox {sandbox} kept so the failed run can be inspected",
+        { sandbox },
+      );
+    } else if (sandboxOpts?.keepSandbox) {
+      deps.logger.info("Sandbox {sandbox} kept (keepSandbox)", { sandbox });
+    } else {
+      try {
+        await removeSandbox(sandbox, candidate.workdir, deps);
+        sandboxRemoved = true;
+        deps.logger.info("Sandbox {sandbox} removed after success", {
+          sandbox,
+        });
+      } catch (err) {
+        deps.logger.warn(
+          "Sandbox {sandbox} left in place: {error}",
+          { sandbox, error: err instanceof Error ? err.message : String(err) },
+        );
+      }
+    }
+  }
+
   const finishedAt = new Date().toISOString();
   return {
     issueId: candidate.id || null,
-    workdir: candidate.workdir,
+    workdir: runCandidate.workdir,
     branch: candidate.branch,
     base: candidate.base,
     agent: candidate.agent,
@@ -858,6 +1297,8 @@ async function dispatchOne(
     durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
     exitCode,
     success,
+    sandbox,
+    sandboxRemoved,
     stdout,
     stderr,
   };
@@ -1116,7 +1557,10 @@ async function dispatch(
     traceHeaders: ctx.traceHeaders,
     logger: ctx.logger,
   };
-  const result = await dispatchOne(candidate, deps);
+  const result = await dispatchOne(candidate, deps, {
+    sandboxRoot: parsed.sandboxRoot,
+    keepSandbox: parsed.keepSandbox,
+  });
   const instance = `dispatch-${
     sanitizeInstanceName(parsed.issueId ?? parsed.branch)
   }`;
@@ -1164,7 +1608,10 @@ async function sweep(
   let failed = 0;
 
   for (const candidate of parsed.candidates) {
-    const result = await dispatchOne(candidate, deps);
+    const result = await dispatchOne(candidate, deps, {
+      sandboxRoot: parsed.sandboxRoot,
+      keepSandbox: parsed.keepSandbox,
+    });
     const instance = `dispatch-${
       sanitizeInstanceName(candidate.id || candidate.branch)
     }`;
@@ -1206,12 +1653,156 @@ async function sweep(
   return { dataHandles: [summaryHandle, reportHandle, ...handles] };
 }
 
+/**
+ * List the worktrees under a sandbox root without changing anything. Dirty
+ * state, commits ahead of the base, and PR state make teardown a one-command
+ * decision instead of a guess.
+ */
+async function sandboxes(
+  args: z.infer<typeof SandboxesArgsSchema>,
+  ctx: {
+    writeResource: (
+      spec: string,
+      instance: string,
+      data: Record<string, unknown>,
+    ) => Promise<{ name: string }>;
+    signal: AbortSignal;
+    logger: Logger;
+  },
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const parsed = SandboxesArgsSchema.parse(args);
+  const dirs = await listSandboxDirs(parsed.sandboxRoot);
+  const found: SandboxInfo[] = [];
+  for (const dir of dirs) {
+    const info = await inspectSandbox(dir, {
+      base: parsed.base,
+      gitCommand: parsed.gitCommand,
+      ghCommand: parsed.ghCommand,
+      signal: ctx.signal,
+    });
+    if (info) found.push(info);
+  }
+  const listing: SandboxListing = {
+    sandboxRoot: parsed.sandboxRoot,
+    scannedAt: new Date().toISOString(),
+    sandboxes: found,
+  };
+  const handle = await ctx.writeResource("sandboxes", "sandboxes-current", {
+    ...listing,
+  });
+  ctx.logger.info("Found {count} sandbox(es) under {root}", {
+    count: found.length,
+    root: parsed.sandboxRoot,
+  });
+  return { dataHandles: [handle] };
+}
+
+/**
+ * Remove clean sandboxes whose branch is merged or whose PR is closed/merged.
+ * Dry-run by default: a destructive teardown must be asked for explicitly.
+ */
+async function pruneSandboxes(
+  args: z.infer<typeof PruneSandboxesArgsSchema>,
+  ctx: {
+    writeResource: (
+      spec: string,
+      instance: string,
+      data: Record<string, unknown>,
+    ) => Promise<{ name: string }>;
+    signal: AbortSignal;
+    logger: Logger;
+  },
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const parsed = PruneSandboxesArgsSchema.parse(args);
+  const deps: DispatchDeps = {
+    gitCommand: parsed.gitCommand,
+    signal: ctx.signal,
+    logger: ctx.logger,
+  };
+  const dirs = await listSandboxDirs(parsed.sandboxRoot);
+  const infos: SandboxInfo[] = [];
+  for (const dir of dirs) {
+    const info = await inspectSandbox(dir, {
+      base: parsed.base,
+      gitCommand: parsed.gitCommand,
+      ghCommand: parsed.ghCommand,
+      signal: ctx.signal,
+    });
+    if (info) infos.push(info);
+  }
+
+  const removed: string[] = [];
+  const kept: Array<{ path: string; reason: string }> = [];
+  for (const info of infos) {
+    if (!info.removable) {
+      kept.push({ path: info.path, reason: info.reason ?? "not removable" });
+      continue;
+    }
+    if (!info.source) {
+      kept.push({
+        path: info.path,
+        reason: "cannot determine source checkout",
+      });
+      continue;
+    }
+    if (parsed.dryRun) {
+      removed.push(info.path);
+      continue;
+    }
+    try {
+      await removeSandbox(info.path, info.source, deps);
+      removed.push(info.path);
+    } catch (err) {
+      kept.push({
+        path: info.path,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const sources = new Set(
+    infos.filter((i) => removed.includes(i.path) && i.source).map((i) =>
+      i.source
+    ),
+  );
+  let pruned = false;
+  if (!parsed.dryRun) {
+    for (const source of sources) {
+      const result = await git(
+        { gitCommand: parsed.gitCommand, workdir: source, signal: ctx.signal },
+        ["worktree", "prune"],
+      );
+      if (result.success) pruned = true;
+    }
+  }
+
+  const outcome: SandboxPrune = {
+    sandboxRoot: parsed.sandboxRoot,
+    dryRun: parsed.dryRun,
+    scannedAt: new Date().toISOString(),
+    scanned: infos.length,
+    removed,
+    kept,
+    pruned,
+  };
+  const handle = await ctx.writeResource("prune", "prune-current", {
+    ...outcome,
+  });
+  ctx.logger.info(
+    parsed.dryRun
+      ? "Dry run: {count} sandbox(es) would be removed under {root}"
+      : "Removed {count} sandbox(es) under {root}",
+    { count: removed.length, root: parsed.sandboxRoot },
+  );
+  return { dataHandles: [handle] };
+}
+
 // ---------- behavior definition ---------------------------------------------
 
 /** Swamp behavior definition for agent task dispatch. */
 export const model = {
   type: "@maphew/agent-task",
-  version: "2026.10.21.1",
+  version: "2026.10.22.1",
   globalArguments: z.object({}),
   upgrades: [
     {
@@ -1230,6 +1821,12 @@ export const model = {
       toVersion: "2026.10.21.1",
       description:
         "Treat container issue types (epic, convoy) as non-dispatchable: bd ready returns them, and an agent handed one has no concrete deliverable. Their children stay dispatchable and are queued individually; no schema or resource changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.22.1",
+      description:
+        "Own the checkout lifecycle: dispatch/sweep can mint a git worktree per dispatch under sandboxRoot (removed after success, kept on failure or keepSandbox), dispatch results record the sandbox path, and new sandboxes/pruneSandboxes methods make teardown a one-command decision",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -1276,6 +1873,18 @@ export const model = {
       lifetime: "30d" as const,
       garbageCollection: 10,
     },
+    sandboxes: {
+      description: "Read-only listing of worktrees under a sandbox root",
+      schema: SandboxListingSchema,
+      lifetime: "30d" as const,
+      garbageCollection: 10,
+    },
+    prune: {
+      description: "Outcome of a sandbox prune (dry-run by default)",
+      schema: SandboxPruneSchema,
+      lifetime: "30d" as const,
+      garbageCollection: 10,
+    },
   },
   files: {
     report: {
@@ -1309,6 +1918,18 @@ export const model = {
         "Run one headless agent on a prompt in a checkout, and nothing else: no branching, no source control, no plan. The runner primitive other extensions call through `runModel` when they own their own git workflow.",
       arguments: RunArgsSchema,
       execute: run,
+    },
+    sandboxes: {
+      description:
+        "List the worktrees under a sandbox root with dirty state, commits ahead, and PR state; read-only",
+      arguments: SandboxesArgsSchema,
+      execute: sandboxes,
+    },
+    pruneSandboxes: {
+      description:
+        "Remove clean sandbox worktrees whose branch is merged or whose PR is closed/merged, then git worktree prune; dry-run by default",
+      arguments: PruneSandboxesArgsSchema,
+      execute: pruneSandboxes,
     },
   },
 };

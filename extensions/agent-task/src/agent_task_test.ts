@@ -10,6 +10,9 @@ import {
   renderManifestReport,
   renderSweepReport,
   runnerInstruction,
+  sandboxNameFor,
+  sandboxPathFor,
+  sandboxVerdict,
   sanitizeInstanceName,
   skipReason,
 } from "./agent_task.ts";
@@ -121,6 +124,55 @@ Deno.test("sanitizeInstanceName keeps safe characters and strips edges", () => {
   assertEquals(sanitizeInstanceName("bd/myswamp-xcy"), "bd-myswamp-xcy");
   assertEquals(sanitizeInstanceName("---"), "unknown");
   assertEquals(sanitizeInstanceName(""), "unknown");
+});
+
+Deno.test("sandboxNameFor is repo plus flattened issue id", () => {
+  assertEquals(sandboxNameFor("/home/mhw/dev/myswamp", "myswamp-xcy"), "myswamp-myswamp-xcy");
+  assertEquals(sandboxNameFor("/repo/", "a/b"), "repo-a-b");
+  assertEquals(sandboxNameFor("/repo", ""), "repo-task");
+});
+
+Deno.test("sandboxPathFor joins an absolute root", () => {
+  assertEquals(
+    sandboxPathFor("/srv/.worktrees", "/home/mhw/dev/myswamp", "myswamp-xcy"),
+    "/srv/.worktrees/myswamp-myswamp-xcy",
+  );
+});
+
+Deno.test("sandboxPathFor resolves a relative root against the source", () => {
+  assertEquals(
+    sandboxPathFor("../.worktrees", "/home/mhw/dev/myswamp/", "myswamp-xcy"),
+    "/home/mhw/dev/myswamp/../.worktrees/myswamp-myswamp-xcy",
+  );
+});
+
+Deno.test("sandboxVerdict never removes a dirty worktree", () => {
+  assertEquals(sandboxVerdict({ dirty: true, merged: true, prState: "MERGED" }), {
+    removable: false,
+    reason: "uncommitted changes",
+  });
+});
+
+Deno.test("sandboxVerdict removes merged and closed-PR worktrees", () => {
+  assertEquals(sandboxVerdict({ dirty: false, merged: true, prState: null }), {
+    removable: true,
+    reason: null,
+  });
+  assertEquals(
+    sandboxVerdict({ dirty: false, merged: false, prState: "closed" }),
+    { removable: true, reason: null },
+  );
+});
+
+Deno.test("sandboxVerdict keeps an unmerged, unclosed worktree", () => {
+  assertEquals(sandboxVerdict({ dirty: false, merged: false, prState: "OPEN" }), {
+    removable: false,
+    reason: "PR is open",
+  });
+  assertEquals(sandboxVerdict({ dirty: false, merged: false, prState: null }), {
+    removable: false,
+    reason: "branch not merged",
+  });
 });
 
 Deno.test("coerceWorkdirMap passes an object through", () => {

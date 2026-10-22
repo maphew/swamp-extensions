@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/agent-task"
-version: "2026.10.21.1"
+version: "2026.10.22.1"
 description: >-
   Headless agent dispatch as a swamp behavior: filter the bd ready queue into a
   typed manifest, branch a target checkout and run one agent on a task, sweep

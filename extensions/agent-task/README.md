@@ -40,6 +40,8 @@ swamp extension pull @maphew/agent-task
 | `dispatch`    | Branch a target checkout and run one agent on one task                  |
 | `sweep`       | Dispatch every candidate from a manifest, serially, under one lock      |
 | `run`         | Run one headless agent on a prompt in a checkout — no git, no plan      |
+| `sandboxes`   | List sandbox worktrees with dirty state, commits ahead, and PR state    |
+| `pruneSandboxes` | Remove clean merged/closed sandboxes (dry-run by default)            |
 
 ### `run`
 
@@ -100,6 +102,49 @@ concurrent runs — and the interactive session that launched them — cannot
 silently double-claim a bead. A failed agent exit is recorded in the `dispatch`
 resource and then raised so the calling workflow step fails.
 
+### Sandboxes: let `dispatch`/`sweep` mint the checkout
+
+Pass `sandboxRoot` and the agent runs in a fresh `git worktree` instead of the
+mapped checkout:
+
+```bash
+swamp behavior run agent-task dispatch \
+  --input workdir=/srv/myswamp \
+  --input branch=bd/myswamp-xcy \
+  --input task="Implement the thing" \
+  --input sandboxRoot=/srv/.worktrees \
+  --input issueId=myswamp-xcy
+```
+
+The worktree is created as
+`<sandboxRoot>/<repo>-<id>` from `origin/<base>` and removed after a **successful**
+run. A failed run is always kept for inspection, and `keepSandbox=true` keeps a
+successful one too. The `dispatch` resource records the path in `sandbox`.
+
+`workdirMap` still maps an issue-id prefix to the **source** checkout; the
+sandbox path is derived, so N issues in one repo need one checkout, not N.
+
+Worktrees share the source repo's object database and show up in
+`git worktree list`, which is why they are preferred over `git clone` for
+isolation.
+
+### `sandboxes` and `pruneSandboxes`
+
+`sandboxes` is read-only: it lists each worktree under `sandboxRoot` with its
+branch, source checkout, dirty state, commits ahead of the base, whether HEAD is
+already merged, and the PR state when `gh` can answer.
+
+`pruneSandboxes` removes only **clean** sandboxes whose branch is merged into the
+base or whose PR is closed/merged, then runs `git worktree prune`. It is a dry
+run by default; pass `dryRun=false` to act.
+
+```bash
+swamp behavior run agent-task sandboxes --input sandboxRoot=/srv/.worktrees
+swamp behavior run agent-task pruneSandboxes --input sandboxRoot=/srv/.worktrees
+swamp behavior run agent-task pruneSandboxes \
+  --input sandboxRoot=/srv/.worktrees --input dryRun=false
+```
+
 ### `sweep`
 
 Fan-out over a manifest's candidates. One method call holds one behavior lock
@@ -136,6 +181,8 @@ a `report` file.
     methodName: sweep
     inputs:
       candidates: ${{ data.latest("agent-task-queue", "manifest").attributes.candidates }}
+      sandboxRoot: ${{ inputs.sandboxRoot }}
+      keepSandbox: ${{ inputs.keepSandbox }}
 ```
 
 For concurrent ad-hoc dispatches, give each run its own `behaviorName` (the
@@ -148,6 +195,9 @@ swamp data query 'modelName == "agent-task-queue" && name == "manifest"' \
   --select content --single
 
 swamp data query 'modelName == "agent-task-queue" && name == "sweep"' \
+  --select content --single
+
+swamp data query 'modelName == "agent-task-queue" && name == "sandboxes-current"' \
   --select content --single
 ```
 
