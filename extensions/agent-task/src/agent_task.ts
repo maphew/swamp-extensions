@@ -980,6 +980,12 @@ async function removeSandbox(
   );
 }
 
+/** Absolute form of a path, resolving a relative one against the process cwd. */
+function absolutePath(path: string): string {
+  if (path.startsWith("/")) return path;
+  return `${Deno.cwd().replace(/\/+$/, "")}/${path}`;
+}
+
 /** Directory name from an absolute or relative path. */
 function dirName(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
@@ -1214,7 +1220,7 @@ async function dispatchOne(
     if (sandboxOpts?.sandboxRoot) {
       sandbox = sandboxPathFor(
         sandboxOpts.sandboxRoot,
-        candidate.workdir,
+        absolutePath(candidate.workdir),
         candidate.id || candidate.branch,
       );
       deps.logger.info("Creating sandbox {sandbox} from {source}", {
