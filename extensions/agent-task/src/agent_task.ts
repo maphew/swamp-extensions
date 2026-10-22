@@ -302,8 +302,17 @@ const DEFAULT_SKIP_LABELS = [
   "duplicate",
 ];
 
-/** Issue types that are investigation, not implementation. */
-const DEFAULT_SKIP_TYPES = ["spike"];
+/**
+ * Issue types that are not dispatchable work on their own.
+ *
+ * `spike` is investigation, not implementation. `epic` and `convoy` are
+ * containers: bd returns them from `bd ready` (verified on 1.3.1, where a
+ * parent epic and its child are both ready), and an agent handed one has no
+ * concrete deliverable — it would invent scope. Their children are the
+ * dispatchable units and are queued individually; the container closes when
+ * they close.
+ */
+const DEFAULT_SKIP_TYPES = ["spike", "epic", "convoy"];
 
 /** Cap on the `bd ready` probe so a truncated queue is visible, not silent. */
 const BD_READY_LIMIT = 500;
@@ -1202,7 +1211,7 @@ async function sweep(
 /** Swamp behavior definition for agent task dispatch. */
 export const model = {
   type: "@maphew/agent-task",
-  version: "2026.10.18.1",
+  version: "2026.10.21.1",
   globalArguments: z.object({}),
   upgrades: [
     {
@@ -1215,6 +1224,12 @@ export const model = {
       toVersion: "2026.10.18.1",
       description:
         "Add the `run` runner primitive (one agent process, no git) and route dispatch through it; other extensions call `run` via runModel instead of copying buildAgentInvocation",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.21.1",
+      description:
+        "Treat container issue types (epic, convoy) as non-dispatchable: bd ready returns them, and an agent handed one has no concrete deliverable. Their children stay dispatchable and are queued individually; no schema or resource changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

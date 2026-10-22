@@ -64,6 +64,27 @@ Deno.test("skipReason drops a spike", () => {
   assertEquals(skipReason(issue), "type:spike");
 });
 
+Deno.test("skipReason drops an epic: a container is not a dispatch unit", () => {
+  // bd ready returns epics (verified on bd 1.3.1), so this default is what
+  // keeps one from being handed to an agent as if it were implementation.
+  const issue = normalizeBdIssue({
+    id: "x",
+    issue_type: "epic",
+    labels: [],
+  });
+  assertEquals(skipReason(issue), "type:epic");
+});
+
+Deno.test("skipReason drops a convoy for the same reason", () => {
+  const issue = normalizeBdIssue({ id: "x", issue_type: "convoy" });
+  assertEquals(skipReason(issue), "type:convoy");
+});
+
+Deno.test("skipReason still admits a plain feature", () => {
+  const issue = normalizeBdIssue({ id: "x", issue_type: "feature" });
+  assertEquals(skipReason(issue), null);
+});
+
 Deno.test("skipReason drops an issue with open dependencies", () => {
   const issue = normalizeBdIssue({ id: "x", dependency_count: 1 });
   assertEquals(skipReason(issue), "blocked-by-dependencies");
@@ -125,7 +146,11 @@ Deno.test("buildAgentInvocation gives claude the full prompt positionally", () =
     workingDir: "/repo",
   });
   assertEquals(inv.binary, "claude");
-  assertEquals(inv.args, ["-p", "--dangerously-skip-permissions", "sys\n\ntask"]);
+  assertEquals(inv.args, [
+    "-p",
+    "--dangerously-skip-permissions",
+    "sys\n\ntask",
+  ]);
 });
 
 Deno.test("buildAgentInvocation splits opencode into task and system prompt", () => {
@@ -143,7 +168,14 @@ Deno.test("buildAgentInvocation sends kilo the dir and full prompt", () => {
     systemPrompt: "sys",
     workingDir: "/repo",
   });
-  assertEquals(inv.args, ["run", "--auto", "--dir", "/repo", "--", "sys\n\ntask"]);
+  assertEquals(inv.args, [
+    "run",
+    "--auto",
+    "--dir",
+    "/repo",
+    "--",
+    "sys\n\ntask",
+  ]);
 });
 
 Deno.test("buildTaskPrompt names the issue and the base branch", () => {
@@ -152,7 +184,9 @@ Deno.test("buildTaskPrompt names the issue and the base branch", () => {
     "/repo",
     "main",
   );
-  if (!prompt.includes("myswamp-1") || !prompt.includes("/repo's main branch")) {
+  if (
+    !prompt.includes("myswamp-1") || !prompt.includes("/repo's main branch")
+  ) {
     throw new Error(`unexpected prompt: ${prompt}`);
   }
 });
