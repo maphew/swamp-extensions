@@ -4,12 +4,14 @@ import {
   AGENT_TASK_INSTANCE,
   AGENT_TASK_TYPE,
   buildReviewPrompt,
+  checkToolAvailable,
   combineVerifyResult,
   derivePrState,
   mergeVerdicts,
   model,
   parseRemoteRepo,
   parseReportForVerdicts,
+  preflightTools,
   resolveRemoteForRepo,
   resolveSweeperPromptPath,
   TOPPED_UP_DETAIL,
@@ -513,4 +515,58 @@ Deno.test("review defaults its batch and sync settings", () => {
 
 Deno.test("list reports its batch grouping input default", () => {
   assertEquals(model.methods.list.arguments.parse({}).batchSize, 0);
+});
+
+Deno.test("checkToolAvailable passes when the probe finds the tool", async () => {
+  const probed: string[] = [];
+  await checkToolAvailable("gh", async (tool) => {
+    probed.push(tool);
+    return 0;
+  });
+  assertEquals(probed, ["gh"]);
+});
+
+Deno.test("checkToolAvailable treats a non-zero --version exit as present", async () => {
+  await checkToolAvailable("kilo", async () => 2);
+});
+
+Deno.test("checkToolAvailable fails fast naming the missing tool", async () => {
+  let message = "";
+  try {
+    await checkToolAvailable("opencode", async () => null);
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  assertEquals(message.includes("'opencode'"), true);
+  assertEquals(message.includes("not found on PATH"), true);
+});
+
+Deno.test("preflightTools probes git and gh, and the agent only when asked", async () => {
+  const seen: string[][] = [];
+  let logged = 0;
+  const ctx = {
+    logger: {
+      info: () => {
+        logged += 1;
+      },
+    },
+  };
+  await preflightTools({}, ctx, async (tool) => {
+    seen.push([tool]);
+    return 0;
+  });
+  assertEquals(seen.flat(), ["git", "gh"]);
+
+  seen.length = 0;
+  const tools = await preflightTools(
+    { needsAgent: true, agent: "codex" },
+    ctx,
+    async (tool) => {
+      seen.push([tool]);
+      return 0;
+    },
+  );
+  assertEquals(seen.flat(), ["git", "gh", "codex"]);
+  assertEquals(tools, ["git", "gh", "codex"]);
+  assertEquals(logged, 2);
 });

@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@maphew/pr-sweep"
-version: 2026.10.18.1
+version: 2026.10.23.1
 description: >-
   Sweep open pull requests a fork contributes to an upstream GitHub repo.
   Composable steps — list, review (one agent per batch), sync, verdicts,

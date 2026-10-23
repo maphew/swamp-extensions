@@ -19,6 +19,11 @@ the repository pairs (upstream + fork) that a sweep-all workflow iterates.
 - GitHub permissions to push to the fork and merge in the upstream (a
   fork-maintainer workflow). The sweep never pushes to a protected branch.
 
+Every step preflights those binaries before it starts (`git` and `gh` always,
+plus the selected agent for `review`/`sweep`) and fails immediately with a
+message naming the missing tool, rather than surfacing an opaque subprocess
+exit partway through a sweep.
+
 ## Install
 
 ```bash
