@@ -9,17 +9,21 @@
  *   - pulled extensions whose source files are missing (the types resolve in
  *     the lockfile but blow up at run time)
  *   - `.swamp/` artifacts that are not covered by `.gitignore`
+ *   - workflow-invoked scripts that are missing an exec bit or shebang, and
+ *     workflow schedules that do not match live scheduler registrations
  *
  * Methods:
  *   - `scan`       run every check and write a combined report
  *   - `findPaths`  hardcoded absolute-path findings only
  *   - `checkExtensions`  pulled-extension integrity only
  *   - `checkGitignore`   .swamp/ gitignore coverage only
+ *   - `checkWorkflowWiring`  script exec/shebang and schedule registration drift
  *
  * @module
  */
 
 import { z } from "npm:zod@4";
+import { parse as parseYaml } from "jsr:@std/yaml@1.3.0";
 
 // ---------- schemas ---------------------------------------------------------
 
@@ -81,6 +85,42 @@ const ScaffoldingReportSchema = z.object({
   warningCount: z.number().int(),
 });
 
+const WorkflowScriptSchema = z.object({
+  workflow: z.string(),
+  file: z.string().describe("Repo-relative workflow YAML path"),
+  step: z.string(),
+  path: z.string().describe("Script path as written in the workflow"),
+  absolutePath: z.string().describe("Resolved path that was stat'ed"),
+  exists: z.boolean(),
+  executable: z.boolean(),
+  shebang: z.string().nullable().describe(
+    "First line when it starts with #!, otherwise null",
+  ),
+});
+
+const WorkflowScheduleSchema = z.object({
+  workflow: z.string(),
+  file: z.string().nullable().describe(
+    "Repo-relative workflow YAML path; null for live registrations",
+  ),
+  cron: z.string(),
+});
+
+const WorkflowWiringReportSchema = z.object({
+  workflowDirs: z.array(z.string()),
+  workflowFiles: z.array(z.string()),
+  scripts: z.array(WorkflowScriptSchema),
+  declaredSchedules: z.array(WorkflowScheduleSchema),
+  liveSchedules: z.array(WorkflowScheduleSchema),
+  liveSource: z.enum(["serve", "cli", "none"]).describe(
+    "Where live registrations came from; none means both were unavailable",
+  ),
+  liveDetail: z.string().nullable(),
+  findings: z.array(FindingSchema),
+  errorCount: z.number().int(),
+  warningCount: z.number().int(),
+});
+
 const ScanReportSchema = z.object({
   projectDir: z.string(),
   healthy: z.boolean(),
@@ -110,12 +150,24 @@ const GlobalArgsSchema = z.object({
   denoBin: z.string().default("deno").describe(
     "deno executable used for scaffolding typechecks; falls back to DENO_BIN and ~/.swamp/deno/deno",
   ),
+  workflowDirs: z.array(z.string()).default(["workflows"]).describe(
+    "Repo-relative directories scanned for workflow YAML",
+  ),
+  swampBin: z.string().default("swamp").describe(
+    "swamp executable used to read live workflow registrations; falls back to SWAMP_BIN",
+  ),
+  serveUrl: z.string().default("http://127.0.0.1:9090").describe(
+    "swamp serve base URL probed for live schedules via /api/v1/health; unreachable is not an error",
+  ),
 });
 
 // ---------- helpers ---------------------------------------------------------
 
 type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
 type Finding = z.infer<typeof FindingSchema>;
+type WorkflowScript = z.infer<typeof WorkflowScriptSchema>;
+type WorkflowSchedule = z.infer<typeof WorkflowScheduleSchema>;
+type LiveSource = z.infer<typeof WorkflowWiringReportSchema>["liveSource"];
 type ModelContext = {
   globalArgs: GlobalArgs;
   writeResource: (
@@ -387,6 +439,637 @@ async function checkGitignore(
   );
 
   return { gitignorePresent, ignored, expected: EXPECTED_IGNORED, uncovered };
+}
+
+// ---------- workflow wiring --------------------------------------------------
+
+// Shell scripts, plus the interpreted languages commonly used for workflow
+// helper scripts. A no-extension path is still a candidate when it lives under
+// an explicit path prefix (./, ../, ~/, /); it is only treated as a script
+// after its shebang is read.
+const SCRIPT_EXTENSION_RE =
+  /\.(?:sh|bash|zsh|ksh|fish|py|rb|pl|php|js|mjs|cjs|ts|tsx)$/i;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Split a shell command into words, honouring single/double quotes and
+ * backslash escapes. Shell concatenation such as `'/repo'/.kilo/a.sh` becomes
+ * a single word, which is how workflows reference scripts with quoted roots.
+ */
+export function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let started = false;
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  const push = () => {
+    if (started) {
+      words.push(current);
+      current = "";
+      started = false;
+    }
+  };
+
+  for (const ch of command) {
+    if (escaped) {
+      escaped = false;
+      if (ch === "\n") continue;
+      current += ch;
+      started = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else current += ch;
+      started = true;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === "\\") escaped = true;
+      else current += ch;
+      started = true;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      push();
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  push();
+  return words;
+}
+
+/**
+ * Extract script-looking paths from a shell command. Variables and URLs are
+ * skipped because they cannot be resolved statically. Tokens with a
+ * non-script extension (for example an output `.json` path) are ignored.
+ */
+export function extractScriptPaths(command: string): string[] {
+  const paths: string[] = [];
+  for (const word of shellWords(command)) {
+    if (!word || word.startsWith("-")) continue;
+    if (/^(?:https?|ftp|file):\/\//i.test(word)) continue;
+    if (word.includes("$") || word.includes("{{")) continue;
+    if (/^\d*[<>]/.test(word)) continue;
+
+    const base = word.slice(word.lastIndexOf("/") + 1);
+    const hasExtension = base.includes(".");
+    if (hasExtension && !SCRIPT_EXTENSION_RE.test(base)) continue;
+    if (!word.includes("/") && !SCRIPT_EXTENSION_RE.test(base)) continue;
+    if (
+      !SCRIPT_EXTENSION_RE.test(base) &&
+      !/^(?:\.{1,2}\/|\/|~\/)/.test(word)
+    ) continue;
+
+    if (!paths.includes(word)) paths.push(word);
+  }
+  return paths;
+}
+
+export interface ScriptInspection {
+  exists: boolean;
+  executable: boolean;
+  shebang: string | null;
+}
+
+/** Stat a referenced script and read just enough of it to find a shebang. */
+export async function inspectScript(path: string): Promise<ScriptInspection> {
+  const missing = { exists: false, executable: false, shebang: null };
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.stat(path);
+  } catch {
+    return missing;
+  }
+  if (!info.isFile) return missing;
+
+  let shebang: string | null = null;
+  let file: Deno.FsFile | null = null;
+  try {
+    file = await Deno.open(path, { read: true });
+    const buffer = new Uint8Array(256);
+    const read = await file.read(buffer);
+    if (read) {
+      const firstLine = new TextDecoder().decode(buffer.subarray(0, read))
+        .split("\n")[0].trim();
+      if (firstLine.startsWith("#!")) shebang = firstLine;
+    }
+  } catch {
+    // Unreadable but stat'able: report exec-bit state without a shebang.
+  } finally {
+    try {
+      file?.close();
+    } catch {
+      // already closed
+    }
+  }
+
+  return {
+    exists: true,
+    executable: ((info.mode ?? 0) & 0o111) !== 0,
+    shebang,
+  };
+}
+
+/** Normalise `.` and `..` without importing a node:path dependency. */
+export function normalizePath(path: string): string {
+  const absolute = path.startsWith("/");
+  const parts: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..") {
+        parts.pop();
+      } else if (!absolute) {
+        parts.push("..");
+      }
+      continue;
+    }
+    parts.push(segment);
+  }
+  return `${absolute ? "/" : ""}${parts.join("/")}`;
+}
+
+/** Resolve a script token against a working directory, expanding a leading ~. */
+export function resolveScriptPath(
+  raw: string,
+  baseDir: string,
+  home = "",
+): string {
+  let path = raw;
+  if (home && (path === "~" || path.startsWith("~/"))) {
+    path = `${home}${path.slice(1)}`;
+  }
+  if (path.startsWith("/")) return normalizePath(path);
+  if (baseDir === "" || baseDir === ".") return normalizePath(path);
+  return normalizePath(`${baseDir}/${path}`);
+}
+
+export interface ShellInvocation {
+  step: string;
+  command: string;
+  workingDir: string | null;
+}
+
+function isShellTask(task: Record<string, unknown>): boolean {
+  const type = task.type;
+  const modelType = task.modelType;
+  const behavior = task.behavior;
+  return (
+    type === "shell" ||
+    type === "command" ||
+    modelType === "command/shell" ||
+    modelType === "shell" ||
+    modelType === "command" ||
+    behavior === "command/shell"
+  );
+}
+
+/**
+ * Find command/shell invocations in a parsed workflow. Supports the current
+ * `model_method` + `modelType: command/shell` shape and the older task-level
+ * `command`/`shell`/`run` variants.
+ */
+export function extractShellInvocations(
+  workflow: unknown,
+): ShellInvocation[] {
+  const invocations: ShellInvocation[] = [];
+  if (!isRecord(workflow) || !Array.isArray(workflow.jobs)) return invocations;
+
+  for (const job of workflow.jobs) {
+    if (!isRecord(job) || !Array.isArray(job.steps)) continue;
+    for (const step of job.steps) {
+      if (!isRecord(step)) continue;
+      const task = isRecord(step.task) ? step.task : null;
+      const inputs = task && isRecord(task.inputs) ? task.inputs : null;
+      const commands: string[] = [];
+      const add = (value: unknown) => {
+        if (typeof value === "string" && value.trim()) commands.push(value);
+      };
+
+      const isShell = (task !== null && isShellTask(task)) ||
+        step.command !== undefined || step.shell !== undefined;
+
+      if (isShell) {
+        add(inputs?.run);
+        add(inputs?.command);
+        add(inputs?.shell);
+        add(task?.run);
+        add(task?.command);
+        add(task?.shell);
+        add(step.run);
+        add(step.command);
+        add(step.shell);
+      }
+
+      const workingDir = typeof inputs?.workingDir === "string"
+        ? inputs.workingDir
+        : typeof task?.workingDir === "string"
+        ? task.workingDir
+        : null;
+      const stepName = typeof step.name === "string"
+        ? step.name
+        : typeof job.name === "string"
+        ? job.name
+        : "step";
+
+      for (const command of commands) {
+        invocations.push({ step: stepName, command, workingDir });
+      }
+    }
+  }
+  return invocations;
+}
+
+export function workflowNameOf(workflow: unknown): string | null {
+  return isRecord(workflow) && typeof workflow.name === "string"
+    ? workflow.name
+    : null;
+}
+
+export function declaredScheduleOf(workflow: unknown): string | null {
+  if (!isRecord(workflow) || !isRecord(workflow.trigger)) return null;
+  const schedule = workflow.trigger.schedule;
+  return typeof schedule === "string" && schedule.trim()
+    ? schedule.trim()
+    : null;
+}
+
+export interface ScheduleDiffEntry {
+  kind: "declared-unregistered" | "registered-undeclared" | "mismatch";
+  workflow: string;
+  declared: string | null;
+  live: string | null;
+  file: string | null;
+}
+
+/**
+ * Diff declared workflow schedules against live registrations by workflow name.
+ * A cron mismatch is reported once as `mismatch` rather than as both missing
+ * directions.
+ */
+export function diffSchedules(
+  declared: WorkflowSchedule[],
+  live: WorkflowSchedule[],
+): ScheduleDiffEntry[] {
+  const declaredByName = new Map(declared.map((s) => [s.workflow, s]));
+  const liveByName = new Map(live.map((s) => [s.workflow, s]));
+  const diffs: ScheduleDiffEntry[] = [];
+
+  for (const [name, entry] of declaredByName) {
+    const actual = liveByName.get(name);
+    if (!actual) {
+      diffs.push({
+        kind: "declared-unregistered",
+        workflow: name,
+        declared: entry.cron,
+        live: null,
+        file: entry.file,
+      });
+    } else if (actual.cron !== entry.cron) {
+      diffs.push({
+        kind: "mismatch",
+        workflow: name,
+        declared: entry.cron,
+        live: actual.cron,
+        file: entry.file,
+      });
+    }
+  }
+
+  for (const [name, entry] of liveByName) {
+    if (declaredByName.has(name)) continue;
+    diffs.push({
+      kind: "registered-undeclared",
+      workflow: name,
+      declared: null,
+      live: entry.cron,
+      file: entry.file,
+    });
+  }
+
+  return diffs;
+}
+
+/** Parse `swamp workflow search --json`; malformed input yields no schedules. */
+export function parseWorkflowSearchJson(raw: string): WorkflowSchedule[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!isRecord(data) || !Array.isArray(data.results)) return [];
+  const schedules: WorkflowSchedule[] = [];
+  for (const result of data.results) {
+    if (!isRecord(result) || typeof result.name !== "string") continue;
+    const trigger = isRecord(result.trigger) ? result.trigger : null;
+    if (typeof trigger?.schedule !== "string" || !trigger.schedule.trim()) {
+      continue;
+    }
+    schedules.push({
+      workflow: result.name,
+      file: null,
+      cron: trigger.schedule.trim(),
+    });
+  }
+  return schedules;
+}
+
+/** Parse the `scheduling.schedules` block of `/api/v1/health`. */
+export function parseServeHealthJson(raw: string): WorkflowSchedule[] {
+  const data: unknown = JSON.parse(raw);
+  if (!isRecord(data) || !isRecord(data.scheduling)) {
+    throw new Error("health response has no scheduling block");
+  }
+  const schedules = data.scheduling.schedules;
+  if (!Array.isArray(schedules)) {
+    throw new Error("health response has no scheduling.schedules array");
+  }
+  const out: WorkflowSchedule[] = [];
+  for (const entry of schedules) {
+    if (!isRecord(entry)) continue;
+    if (typeof entry.workflowName !== "string" || !entry.workflowName.trim()) {
+      continue;
+    }
+    if (
+      typeof entry.cronExpression !== "string" || !entry.cronExpression.trim()
+    ) {
+      continue;
+    }
+    out.push({
+      workflow: entry.workflowName,
+      file: null,
+      cron: entry.cronExpression.trim(),
+    });
+  }
+  return out;
+}
+
+async function runSwampSearch(
+  cfg: GlobalArgs,
+): Promise<{
+  schedules: WorkflowSchedule[];
+  ok: boolean;
+  detail: string | null;
+}> {
+  const bin = Deno.env.get("SWAMP_BIN") || cfg.swampBin;
+  try {
+    const output = await new Deno.Command(bin, {
+      args: ["workflow", "search", "--json", "--repo-dir", cfg.projectDir],
+      cwd: cfg.projectDir,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (output.code !== 0) {
+      return {
+        schedules: [],
+        ok: false,
+        detail: `swamp workflow search exited ${output.code}`,
+      };
+    }
+    const text = new TextDecoder().decode(output.stdout);
+    return {
+      schedules: parseWorkflowSearchJson(text),
+      ok: true,
+      detail: `swamp workflow search --repo-dir ${cfg.projectDir}`,
+    };
+  } catch (error) {
+    return {
+      schedules: [],
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function readLiveSchedules(
+  cfg: GlobalArgs,
+): Promise<{
+  schedules: WorkflowSchedule[];
+  source: LiveSource;
+  detail: string | null;
+}> {
+  const healthUrl = `${cfg.serveUrl.replace(/\/+$/, "")}/api/v1/health`;
+  try {
+    const response = await fetch(healthUrl, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (response.ok) {
+      const text = await response.text();
+      return {
+        schedules: parseServeHealthJson(text),
+        source: "serve",
+        detail: healthUrl,
+      };
+    }
+  } catch {
+    // Serve is optional: fall through to the CLI view.
+  }
+
+  const cli = await runSwampSearch(cfg);
+  if (cli.ok) {
+    return { schedules: cli.schedules, source: "cli", detail: cli.detail };
+  }
+  return { schedules: [], source: "none", detail: cli.detail };
+}
+
+async function checkWorkflowWiring(
+  ctx: ModelContext,
+): Promise<z.infer<typeof WorkflowWiringReportSchema>> {
+  const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
+  const findings: Finding[] = [];
+  const scripts: WorkflowScript[] = [];
+  const declaredSchedules: WorkflowSchedule[] = [];
+  const workflowFiles: string[] = [];
+  const home = Deno.env.get("HOME") ?? "";
+
+  for (const dir of cfg.workflowDirs) {
+    for await (const abs of walk(`${cfg.projectDir}/${dir}`)) {
+      if (!/(^|\/)workflow-[^/]+\.(?:yaml|yml)$/i.test(abs)) continue;
+      const file = relative(cfg.projectDir, abs);
+      workflowFiles.push(file);
+      let workflow: unknown;
+      try {
+        workflow = parseYaml(
+          new TextDecoder().decode(await Deno.readFile(abs)),
+        );
+      } catch (error) {
+        findings.push({
+          check: "workflow-wiring",
+          severity: "warning",
+          file,
+          line: null,
+          message: "Workflow YAML could not be parsed",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      const name = workflowNameOf(workflow) ?? file;
+      const schedule = declaredScheduleOf(workflow);
+      if (schedule) {
+        declaredSchedules.push({ workflow: name, file, cron: schedule });
+      }
+
+      for (const invocation of extractShellInvocations(workflow)) {
+        const baseDir = invocation.workingDir
+          ? resolveScriptPath(invocation.workingDir, cfg.projectDir, home)
+          : cfg.projectDir;
+        for (const raw of extractScriptPaths(invocation.command)) {
+          const absolutePath = resolveScriptPath(raw, baseDir, home);
+          const info = await inspectScript(absolutePath);
+          const looksLikeScript = SCRIPT_EXTENSION_RE.test(raw) ||
+            info.shebang !== null;
+          if (!info.exists) {
+            if (SCRIPT_EXTENSION_RE.test(raw)) {
+              findings.push({
+                check: "workflow-script-missing",
+                severity: "warning",
+                file,
+                line: null,
+                message:
+                  `Step "${invocation.step}" references a missing script`,
+                detail: `${raw} (resolved to ${absolutePath})`,
+              });
+            }
+            continue;
+          }
+          if (!looksLikeScript) continue;
+
+          scripts.push({
+            workflow: name,
+            file,
+            step: invocation.step,
+            path: raw,
+            absolutePath,
+            exists: true,
+            executable: info.executable,
+            shebang: info.shebang,
+          });
+
+          if (!info.executable) {
+            findings.push({
+              check: "workflow-script-not-executable",
+              severity: "error",
+              file,
+              line: null,
+              message:
+                `Step "${invocation.step}" invokes a script without an executable bit`,
+              detail: `${absolutePath} — chmod +x it`,
+            });
+          }
+          if (!info.shebang) {
+            findings.push({
+              check: "workflow-script-missing-shebang",
+              severity: "warning",
+              file,
+              line: null,
+              message:
+                `Step "${invocation.step}" invokes a script without a shebang`,
+              detail:
+                `${absolutePath} — add #!/usr/bin/env bash (or the right interpreter)`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  const live = await readLiveSchedules(cfg);
+  const declaredNames = new Set(declaredSchedules.map((s) => s.workflow));
+  // Extension-owned schedules are declared in their own package, not this
+  // repo's workflows/. Do not report those as undeclared unless this repo also
+  // declares them.
+  const liveForDiff = live.schedules.filter((s) =>
+    declaredNames.has(s.workflow) || !s.workflow.startsWith("@")
+  );
+
+  for (const diff of diffSchedules(declaredSchedules, liveForDiff)) {
+    if (diff.kind === "declared-unregistered") {
+      findings.push({
+        check: "workflow-schedule-unregistered",
+        severity: "error",
+        file: diff.file ?? "workflows",
+        line: null,
+        message:
+          `Workflow "${diff.workflow}" declares schedule "${diff.declared}" but no live registration was found`,
+        detail: live.detail,
+      });
+    } else if (diff.kind === "mismatch") {
+      findings.push({
+        check: "workflow-schedule-mismatch",
+        severity: "error",
+        file: diff.file ?? "workflows",
+        line: null,
+        message:
+          `Workflow "${diff.workflow}" declares schedule "${diff.declared}" but is registered as "${diff.live}"`,
+        detail: live.detail,
+      });
+    } else {
+      findings.push({
+        check: "workflow-schedule-undeclared",
+        severity: "warning",
+        file: diff.file ?? "serve",
+        line: null,
+        message:
+          `Workflow "${diff.workflow}" is registered with schedule "${diff.live}" but no workflow YAML in this repo declares it`,
+        detail: live.detail,
+      });
+    }
+  }
+
+  if (live.source === "none") {
+    findings.push({
+      check: "workflow-schedule-unverified",
+      severity: "info",
+      file: "workflows",
+      line: null,
+      message:
+        "Live workflow schedules could not be read; schedule diff was skipped",
+      detail: live.detail,
+    });
+  }
+
+  const report: z.infer<typeof WorkflowWiringReportSchema> = {
+    workflowDirs: cfg.workflowDirs,
+    workflowFiles,
+    scripts,
+    declaredSchedules,
+    liveSchedules: live.schedules,
+    liveSource: live.source,
+    liveDetail: live.detail,
+    findings,
+    errorCount: findings.filter((f) => f.severity === "error").length,
+    warningCount: findings.filter((f) => f.severity === "warning").length,
+  };
+
+  ctx.logger.info(
+    "Workflow wiring: {files} workflow(s), {scripts} script(s), {e} error(s)",
+    {
+      files: workflowFiles.length,
+      scripts: scripts.length,
+      e: report.errorCount,
+    },
+  );
+  return report;
 }
 
 // ---------- scaffolding typecheck -------------------------------------------
@@ -685,8 +1368,9 @@ async function scan(
   const paths = await findHardcodedPaths(ctx);
   const extensions = await checkExtensions(ctx);
   const gitignore = await checkGitignore(ctx);
+  const workflowWiring = await checkWorkflowWiring(ctx);
 
-  const findings: Finding[] = [...paths.findings];
+  const findings: Finding[] = [...paths.findings, ...workflowWiring.findings];
 
   for (const name of extensions.missing) {
     findings.push({
@@ -734,6 +1418,11 @@ async function scan(
     await ctx.writeResource("paths", "paths-current", paths),
     await ctx.writeResource("extensions", "extensions-current", extensions),
     await ctx.writeResource("gitignore", "gitignore-current", gitignore),
+    await ctx.writeResource(
+      "workflowWiring",
+      "workflow-wiring-current",
+      workflowWiring,
+    ),
     await ctx.createFileWriter("report", "report-current").writeText(
       renderReport(report),
     ),
@@ -748,7 +1437,7 @@ async function scan(
 
 export const model = {
   type: "@maphew/repo-doctor",
-  version: "2026.10.21.1",
+  version: "2026.10.23.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -767,6 +1456,12 @@ export const model = {
       toVersion: "2026.10.21.1",
       description:
         "Add checkScaffolding: deno check over generated agent scaffolding (.kilo/plugins, .opencode/plugins, .pi/extensions) with scaffoldingDirs and denoBin global args; no change to existing args or resources",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.23.1",
+      description:
+        "Add checkWorkflowWiring: executable-bit/shebang checks for workflow-invoked scripts and declared-vs-live cron diff; new workflowWiring resource, added to scan findings",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -799,6 +1494,13 @@ export const model = {
       description:
         "Typecheck findings for generated agent scaffolding, separate from project-owned code",
       schema: ScaffoldingReportSchema,
+      lifetime: "7d" as const,
+      garbageCollection: 10,
+    },
+    workflowWiring: {
+      description:
+        "Workflow script exec/shebang checks and declared-vs-live schedule diff",
+      schema: WorkflowWiringReportSchema,
       lifetime: "7d" as const,
       garbageCollection: 10,
     },
@@ -874,6 +1576,23 @@ export const model = {
         const handle = await ctx.writeResource(
           "scaffolding",
           "scaffolding-current",
+          report,
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    checkWorkflowWiring: {
+      description:
+        "Check workflow-invoked scripts for exec bit/shebang and diff declared schedules against live registrations",
+      arguments: z.object({}),
+      execute: async (
+        _args: Record<string, never>,
+        ctx: ModelContext,
+      ): Promise<{ dataHandles: Array<{ name: string }> }> => {
+        const report = await checkWorkflowWiring(ctx);
+        const handle = await ctx.writeResource(
+          "workflowWiring",
+          "workflow-wiring-current",
           report,
         );
         return { dataHandles: [handle] };

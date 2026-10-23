@@ -13,6 +13,11 @@ failures, and writes both structured resources and a markdown report.
   source files are missing (the types resolve but blow up at run time).
 - **`.gitignore` coverage** — generated `.swamp/` artifacts that are not
   ignored.
+- **Workflow wiring** — helper scripts invoked by workflow command/shell steps
+  that are missing an executable bit or shebang, plus workflow
+  `trigger: schedule` declarations that do not match live scheduler
+  registrations (`swamp workflow search --json` and the serve `/api/v1/health`
+  endpoint when reachable).
 
 ## Install
 
@@ -23,13 +28,14 @@ swamp model create @maphew/repo-doctor repo-doctor
 
 ## Methods
 
-| Method             | Purpose                                               |
-| ------------------ | ----------------------------------------------------- |
-| `scan`             | Run every check and write a combined markdown report  |
-| `findPaths`        | Hardcoded absolute-path findings only                 |
-| `checkExtensions`  | Pulled-extension source integrity only                |
-| `checkGitignore`   | `.swamp/` gitignore coverage only                     |
-| `checkScaffolding` | Typecheck the generated agent scaffolding, separately |
+| Method                | Purpose                                                    |
+| --------------------- | ---------------------------------------------------------- |
+| `scan`                | Run every check and write a combined markdown report       |
+| `findPaths`           | Hardcoded absolute-path findings only                      |
+| `checkExtensions`     | Pulled-extension source integrity only                     |
+| `checkGitignore`      | `.swamp/` gitignore coverage only                          |
+| `checkScaffolding`    | Typecheck the generated agent scaffolding, separately      |
+| `checkWorkflowWiring` | Script exec/shebang checks and schedule registration drift |
 
 ```bash
 # Full audit
@@ -40,6 +46,7 @@ swamp model method run repo-doctor findPaths
 swamp model method run repo-doctor checkExtensions
 swamp model method run repo-doctor checkGitignore
 swamp model method run repo-doctor checkScaffolding
+swamp model method run repo-doctor checkWorkflowWiring
 
 # Read the report
 swamp data query 'name == "report-current"' --select content
@@ -58,6 +65,12 @@ Global arguments (per model instance):
   typecheck (default `[".kilo/plugins", ".opencode/plugins", ".pi/extensions"]`)
 - `denoBin` — deno executable for the scaffolding typecheck (default `deno`,
   then `$DENO_BIN`, then `~/.swamp/deno/deno`)
+- `workflowDirs` — repo-relative dirs scanned for workflow YAML (default
+  `["workflows"]`)
+- `swampBin` — swamp executable used to read live workflow registrations
+  (default `swamp`, then `$SWAMP_BIN`)
+- `serveUrl` — swamp serve base URL probed at `/api/v1/health` for live
+  schedules (default `http://127.0.0.1:9090`); unreachable is not an error
 
 ## Output
 
@@ -69,6 +82,9 @@ Global arguments (per model instance):
 - `scaffolding-current` — scaffolding typecheck: `denoBin`, `skipped`,
   `skipReason`, `checkedDirs`, `missingDirs`, `packageRoots`, `checkedFiles`,
   findings, and error/warning counts
+- `workflow-wiring-current` — workflow wiring: referenced scripts (path,
+  resolved path, exec bit, shebang), declared and live schedules, live source
+  (`serve`, `cli`, or `none`), and findings
 - `report-current` — markdown report
 
 ## Notes
@@ -84,6 +100,13 @@ nearest package root so the plugin's own `node_modules` resolves. A dir whose
 checkout with no deno config enabling `nodeModulesDir: auto`) yields a single
 file-level finding carrying the stderr tail — that is an environment gap to fix,
 not a plugin defect.
+
+`checkWorkflowWiring` is read-only and never fails the run: an unreachable serve
+or missing `swamp` binary simply falls back to the CLI view or records
+`liveSource: "none"`. It is part of `scan`, so a script that lost its exec bit
+or a cron with no registration shows up as a finding. Extension-owned schedules
+(names beginning with `@`) are ignored in the undeclared direction because they
+are declared in their own package, not in this repo's `workflows/`.
 
 ## License
 
