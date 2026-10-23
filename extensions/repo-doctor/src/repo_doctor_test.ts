@@ -6,14 +6,25 @@
 
 import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
+  declaredScheduleOf,
+  diffSchedules,
+  extractScriptPaths,
+  extractShellInvocations,
+  inspectScript,
   isCovered,
   isScaffoldingSource,
+  normalizePath,
   offendingLines,
   parseDenoCheckOutput,
   parseManifestList,
+  parseServeHealthJson,
+  parseWorkflowSearchJson,
   relative,
   renderReport,
+  resolveScriptPath,
+  shellWords,
   stripAnsi,
+  workflowNameOf,
 } from "./repo_doctor.ts";
 
 Deno.test("relative strips the repo root prefix", () => {
@@ -218,4 +229,175 @@ Deno.test("parseDenoCheckOutput decodes percent-encoded file URLs", () => {
     "TS7006 [ERROR]: Parameter 'x' implicitly has an 'any' type.\n  at file:///repo/a%20b/x.ts:2:5";
   const findings = parseDenoCheckOutput(raw, "/repo");
   assertEquals(findings[0].file, "a b/x.ts");
+});
+
+Deno.test("shellWords keeps quoted segments joined and strips quotes", () => {
+  assertEquals(
+    shellWords("'/repo root'/.kilo/agents/run.sh --flag 'two words'"),
+    ["/repo root/.kilo/agents/run.sh", "--flag", "two words"],
+  );
+});
+
+Deno.test("extractScriptPaths finds scripts and skips data paths", () => {
+  const command =
+    "'/var/home/matt/dev/myswamp'/.kilo/agents/ready-queue.sh '{}' '0' > /tmp/bd-ready-manifest.json";
+  assertEquals(
+    extractScriptPaths(command),
+    ["/var/home/matt/dev/myswamp/.kilo/agents/ready-queue.sh"],
+  );
+  assertEquals(extractScriptPaths("python3 -c 'print(1)'"), []);
+  assertEquals(extractScriptPaths("echo $HOME/scripts/run.sh"), []);
+  assertEquals(extractScriptPaths("https://example.com/run.sh"), []);
+  assertEquals(extractScriptPaths("./tools/check"), ["./tools/check"]);
+});
+
+Deno.test("normalizePath collapses dot segments without node:path", () => {
+  assertEquals(normalizePath("/a/b/../c/./d"), "/a/c/d");
+  assertEquals(normalizePath("../x/../y"), "../y");
+});
+
+Deno.test("resolveScriptPath resolves relative paths and expands ~", () => {
+  assertEquals(resolveScriptPath("./a.sh", "/repo"), "/repo/a.sh");
+  assertEquals(
+    resolveScriptPath("~/bin/a.sh", "/repo", "/home/me"),
+    "/home/me/bin/a.sh",
+  );
+  assertEquals(resolveScriptPath("/abs/a.sh", "/repo"), "/abs/a.sh");
+  assertEquals(resolveScriptPath("./a.sh", "."), "a.sh");
+  assertEquals(resolveScriptPath("./a.sh", ""), "a.sh");
+});
+
+Deno.test("inspectScript reports exec bit and shebang from a temp file", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "repo-doctor-" });
+  try {
+    const script = `${dir}/run.sh`;
+    await Deno.writeTextFile(script, "#!/usr/bin/env bash\necho hi\n");
+    await Deno.chmod(script, 0o755);
+    const executable = await inspectScript(script);
+    assertEquals(executable.exists, true);
+    assertEquals(executable.executable, true);
+    assertEquals(executable.shebang, "#!/usr/bin/env bash");
+
+    await Deno.chmod(script, 0o644);
+    const plain = await inspectScript(script);
+    assertEquals(plain.executable, false);
+
+    const noShebang = `${dir}/plain.sh`;
+    await Deno.writeTextFile(noShebang, "echo hi\n");
+    assertEquals((await inspectScript(noShebang)).shebang, null);
+
+    const missing = await inspectScript(`${dir}/nope.sh`);
+    assertEquals(missing, { exists: false, executable: false, shebang: null });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("extractShellInvocations reads command/shell model_method steps", () => {
+  const workflow = {
+    name: "demo",
+    jobs: [{
+      name: "job",
+      steps: [{
+        name: "run-helper",
+        task: {
+          type: "model_method",
+          modelType: "command/shell",
+          inputs: {
+            run: "./scripts/run.sh",
+            workingDir: "/repo",
+          },
+        },
+      }],
+    }],
+  };
+  assertEquals(extractShellInvocations(workflow), [{
+    step: "run-helper",
+    command: "./scripts/run.sh",
+    workingDir: "/repo",
+  }]);
+  assertEquals(workflowNameOf(workflow), "demo");
+  assertEquals(declaredScheduleOf(workflow), null);
+});
+
+Deno.test("declaredScheduleOf reads a quoted or plain cron", () => {
+  assertEquals(
+    declaredScheduleOf({ trigger: { schedule: "  */5 * * * *  " } }),
+    "*/5 * * * *",
+  );
+  assertEquals(declaredScheduleOf({ trigger: {} }), null);
+  assertEquals(declaredScheduleOf({}), null);
+});
+
+Deno.test("diffSchedules reports unregistered, mismatched, and undeclared", () => {
+  const declared = [
+    { workflow: "keep", file: "workflows/keep.yaml", cron: "0 1 * * *" },
+    { workflow: "missing", file: "workflows/missing.yaml", cron: "0 2 * * *" },
+    { workflow: "changed", file: "workflows/changed.yaml", cron: "0 3 * * *" },
+  ];
+  const live = [
+    { workflow: "keep", file: null, cron: "0 1 * * *" },
+    { workflow: "changed", file: null, cron: "30 3 * * *" },
+    { workflow: "extra", file: null, cron: "0 4 * * *" },
+  ];
+  assertEquals(diffSchedules(declared, live), [
+    {
+      kind: "declared-unregistered",
+      workflow: "missing",
+      declared: "0 2 * * *",
+      live: null,
+      file: "workflows/missing.yaml",
+    },
+    {
+      kind: "mismatch",
+      workflow: "changed",
+      declared: "0 3 * * *",
+      live: "30 3 * * *",
+      file: "workflows/changed.yaml",
+    },
+    {
+      kind: "registered-undeclared",
+      workflow: "extra",
+      declared: null,
+      live: "0 4 * * *",
+      file: null,
+    },
+  ]);
+});
+
+Deno.test("parseWorkflowSearchJson reads trigger schedules", () => {
+  const raw = JSON.stringify({
+    query: "",
+    results: [
+      { name: "a", trigger: { schedule: "0 1 * * *" } },
+      { name: "b" },
+      { name: "c", trigger: { schedule: "  */5 * * * * " } },
+    ],
+  });
+  assertEquals(parseWorkflowSearchJson(raw), [
+    { workflow: "a", file: null, cron: "0 1 * * *" },
+    { workflow: "c", file: null, cron: "*/5 * * * *" },
+  ]);
+  assertEquals(parseWorkflowSearchJson("not json"), []);
+});
+
+Deno.test("parseServeHealthJson reads scheduling.schedules", () => {
+  const raw = JSON.stringify({
+    scheduling: {
+      enabled: true,
+      schedules: [{
+        workflowId: "id",
+        workflowName: "a",
+        cronExpression: "0 1 * * *",
+        nextRun: null,
+        running: false,
+        queued: 0,
+        oldestQueuedAt: null,
+        lastQueueDelayMs: null,
+      }],
+    },
+  });
+  assertEquals(parseServeHealthJson(raw), [
+    { workflow: "a", file: null, cron: "0 1 * * *" },
+  ]);
 });
