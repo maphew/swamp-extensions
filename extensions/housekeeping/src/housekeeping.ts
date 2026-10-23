@@ -69,12 +69,39 @@ const WorktreeSchema = z.object({
   isMain: z.boolean(),
 });
 
+const SiblingCloneSchema = z.object({
+  path: z.string(),
+  name: z.string(),
+  isGitCheckout: z.boolean(),
+  /**
+   * True when `.git` is a file, i.e. a linked worktree or a submodule checkout
+   * rather than a flat `git clone`.
+   */
+  linkedWorktree: z.boolean(),
+  branch: z.string().nullable(),
+  detached: z.boolean(),
+  dirty: z.boolean(),
+  dirtyFiles: z.number().int(),
+  untrackedFiles: z.number().int(),
+  aheadOfBase: z.number().int().nullable(),
+  baseRef: z.string().nullable(),
+  error: z.string().nullable(),
+});
+
+const SiblingsReportSchema = z.object({
+  enabled: z.boolean(),
+  root: z.string().nullable(),
+  pattern: z.string().nullable(),
+  entries: z.array(SiblingCloneSchema),
+});
+
 const WorktreesReportSchema = z.object({
   total: z.number().int(),
   stale: z.array(WorktreeSchema),
   prunable: z.array(WorktreeSchema),
   locked: z.array(WorktreeSchema),
   detached: z.array(WorktreeSchema),
+  siblings: SiblingsReportSchema,
 });
 
 const TempEntrySchema = z.object({
@@ -167,6 +194,12 @@ const GlobalArgsSchema = z.object({
   includeTemp: z.boolean().default(true).describe(
     "Scan for temp debris, leftover processes, and disk pressure",
   ),
+  includeSiblingClones: z.boolean().default(true).describe(
+    "Scan directories beside projectDir for flat sibling clones, which `git worktree list` cannot see",
+  ),
+  siblingPattern: z.string().optional().describe(
+    "Glob for sibling clone directories. Defaults to '<repo>-*', where <repo> is projectDir's basename.",
+  ),
 });
 
 // ---------- shared types ----------------------------------------------------
@@ -176,6 +209,8 @@ type Finding = z.infer<typeof FindingSchema>;
 type Audit = z.infer<typeof AuditSchema>;
 type GitReport = z.infer<typeof GitReportSchema>;
 type WorktreesReport = z.infer<typeof WorktreesReportSchema>;
+type SiblingClone = z.infer<typeof SiblingCloneSchema>;
+type SiblingsReport = z.infer<typeof SiblingsReportSchema>;
 type TempReport = z.infer<typeof TempReportSchema>;
 type BeadsReport = z.infer<typeof BeadsReportSchema>;
 
@@ -276,6 +311,14 @@ export function parseStatusHeader(line: string): {
   const rest = line.slice(3).trim();
   if (rest.startsWith("HEAD (no branch)")) {
     out.detached = true;
+    return out;
+  }
+  // An unborn branch prints `## No commits yet on <branch>` (newer git) or
+  // `## Initial commit on <branch>` (older git); the branch is not the first
+  // token there.
+  const unborn = /^(?:No commits yet on|Initial commit on) (.+)$/.exec(rest);
+  if (unborn) {
+    out.currentBranch = unborn[1].trim() || null;
     return out;
   }
   const [head, ...trackParts] = rest.split(" ");
@@ -399,6 +442,25 @@ export function matchesGlob(name: string, pattern: string): boolean {
   return globToRegExp(pattern).test(name);
 }
 
+/** Directory name component of a POSIX-style absolute path. */
+export function baseName(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+}
+
+/** Parent directory of a POSIX-style absolute path. */
+export function parentDir(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  return idx > 0 ? trimmed.slice(0, idx) : "/";
+}
+
+/** Sibling glob: configured pattern, or `<repo>-*` beside the checkout. */
+export function siblingPatternFor(dir: string, configured?: string): string {
+  return configured?.trim() || `${baseName(dir)}-*`;
+}
+
 /** True when an ISO timestamp is older than `hours` relative to `nowMs`. */
 export function isOlderThan(
   iso: string | null,
@@ -482,7 +544,7 @@ export function renderReport(audit: Audit): string {
   lines.push("---");
   lines.push("");
   lines.push(
-    "This audit reports only what is on a list. Before acting, answer: **What did I notice that isn't on any list?** Do not delete anything ambiguous — file it as a tracker issue or hand it off instead.",
+    "This audit reports only what is on a list. Before acting, answer: **What did I notice that isn't on any list?** Run `ls ..` too — flat sibling clones never appear in `git worktree list`. Do not delete anything ambiguous — file it as a tracker issue or hand it off instead.",
   );
   return lines.join("\n");
 }
@@ -675,8 +737,147 @@ async function checkGit(
   return { report, findings };
 }
 
+async function checkSiblingClones(
+  dir: string,
+  defaultBranch: string,
+  cfg: GlobalArgs,
+): Promise<{ report: SiblingsReport; findings: Finding[] }> {
+  const findings: Finding[] = [];
+  if (!cfg.includeSiblingClones) {
+    return {
+      report: { enabled: false, root: null, pattern: null, entries: [] },
+      findings,
+    };
+  }
+
+  const root = parentDir(dir);
+  const pattern = siblingPatternFor(dir, cfg.siblingPattern);
+  const baseRef = `origin/${defaultBranch}`;
+  const self = baseName(dir);
+  const names: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(root)) {
+      if (!entry.isDirectory || entry.name === self) continue;
+      if (matchesGlob(entry.name, pattern)) names.push(entry.name);
+    }
+  } catch {
+    return {
+      report: { enabled: true, root, pattern, entries: [] },
+      findings,
+    };
+  }
+  names.sort();
+
+  const entries: SiblingClone[] = [];
+  for (const name of names) {
+    const path = `${root}/${name}`;
+    const entry: SiblingClone = {
+      path,
+      name,
+      isGitCheckout: false,
+      linkedWorktree: false,
+      branch: null,
+      detached: false,
+      dirty: false,
+      dirtyFiles: 0,
+      untrackedFiles: 0,
+      aheadOfBase: null,
+      baseRef: null,
+      error: null,
+    };
+
+    if (!(await pathExists(`${path}/.git`))) {
+      entry.error = "no .git entry";
+      entries.push(entry);
+      findings.push({
+        category: "worktrees",
+        severity: "info",
+        message:
+          `Sibling directory '${name}' matches '${pattern}' but is not a git checkout`,
+        detail: "Reported for notice only; nothing was deleted.",
+        target: path,
+      });
+      continue;
+    }
+
+    // `.git` is a directory in a flat clone, and a file in a linked worktree
+    // (or submodule). The two need different removal advice.
+    try {
+      entry.linkedWorktree = (await Deno.stat(`${path}/.git`)).isFile;
+    } catch {
+      entry.linkedWorktree = false;
+    }
+
+    const status = await run(
+      ["git", "status", "--porcelain=v1", "--branch"],
+      path,
+    );
+    if (!status || status.code !== 0) {
+      entry.error = (status?.stderr || "git status failed").trim() ||
+        "git status failed";
+      entries.push(entry);
+      findings.push({
+        category: "worktrees",
+        severity: "info",
+        message: `Could not read sibling clone '${name}'`,
+        detail: entry.error,
+        target: path,
+      });
+      continue;
+    }
+
+    const statusLines = status.stdout.split("\n");
+    const header = parseStatusHeader(statusLines[0] ?? "");
+    const { dirty, untracked } = countStatusFiles(statusLines.slice(1));
+    entry.isGitCheckout = true;
+    entry.branch = header.currentBranch;
+    entry.detached = header.detached;
+    entry.dirty = dirty + untracked > 0;
+    entry.dirtyFiles = dirty;
+    entry.untrackedFiles = untracked;
+    entry.baseRef = baseRef;
+
+    const aheadOut = await stdout(
+      ["git", "rev-list", "--count", `${baseRef}..HEAD`],
+      path,
+    );
+    if (aheadOut !== null) {
+      const parsed = Number(aheadOut.trim());
+      entry.aheadOfBase = Number.isFinite(parsed) ? parsed : null;
+    }
+    entries.push(entry);
+
+    const branchLabel = header.detached
+      ? "a detached HEAD"
+      : `'${header.currentBranch}'`;
+    let message = `Sibling clone '${name}' is on ${branchLabel}`;
+    if (entry.aheadOfBase !== null) {
+      message += `, ${entry.aheadOfBase} commit(s) ahead of ${baseRef}`;
+    }
+    if (entry.dirty) {
+      message += `, ${dirty} modified and ${untracked} untracked file(s)`;
+    }
+    findings.push({
+      category: "worktrees",
+      severity: "info",
+      message,
+      detail: entry.linkedWorktree
+        ? "Linked worktree beside the repo (`.git` is a file), not a flat clone. `git worktree list` should already show it; remove with `git worktree remove` so no stale administrative entry is left behind."
+        : "Flat clone beside the repo, not a linked worktree. Inspect and remove by hand if stale; housekeeping never deletes siblings.",
+      target: path,
+    });
+  }
+
+  return {
+    report: { enabled: true, root, pattern, entries },
+    findings,
+  };
+}
+
 async function checkWorktrees(
   dir: string,
+  defaultBranch: string,
+  cfg: GlobalArgs,
 ): Promise<{ report: WorktreesReport; findings: Finding[] }> {
   const findings: Finding[] = [];
   const raw = await stdout(["git", "worktree", "list", "--porcelain"], dir);
@@ -718,6 +919,9 @@ async function checkWorktrees(
     });
   }
 
+  const siblings = await checkSiblingClones(dir, defaultBranch, cfg);
+  findings.push(...siblings.findings);
+
   return {
     report: {
       total: worktrees.length,
@@ -725,6 +929,7 @@ async function checkWorktrees(
       prunable,
       locked,
       detached,
+      siblings: siblings.report,
     },
     findings,
   };
@@ -1069,7 +1274,7 @@ async function doCheck(ctx: ModelContext): Promise<{
   const git = await checkGit(dir, defaultBranch);
   findings.push(...git.findings);
 
-  const worktrees = await checkWorktrees(dir);
+  const worktrees = await checkWorktrees(dir, defaultBranch, cfg);
   findings.push(...worktrees.findings);
 
   let temp: TempReport | null = null;
@@ -1317,7 +1522,7 @@ const CleanReportSchema = z.object({
 
 export const model = {
   type: "@maphew/housekeeping",
-  version: "2026.10.21.1",
+  version: "2026.10.23.1",
   upgrades: [
     {
       toVersion: "2026.10.15.2",
@@ -1343,6 +1548,12 @@ export const model = {
         "Treat `bd orphans --json` null output as an empty list instead of a parse warning; no schema, method, or resource changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
+    {
+      toVersion: "2026.10.23.1",
+      description:
+        "Add an optional read-only scan of flat sibling clones (`<repo>-*` by default) to the worktrees check and its resource schema; report branch, dirty state, and commits ahead of origin/<base> as info findings. No cleanup behaviour change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
   ],
   globalArguments: GlobalArgsSchema,
   resources: {
@@ -1359,7 +1570,8 @@ export const model = {
       garbageCollection: 10,
     },
     worktrees: {
-      description: "Worktree health: stale, prunable, locked, detached",
+      description:
+        "Worktree health: stale, prunable, locked, detached; plus sibling clone scan",
       schema: WorktreesReportSchema,
       lifetime: "7d" as const,
       garbageCollection: 10,
