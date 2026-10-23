@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/agent-task",
+  "version": "2026.10.23.1",
+  "reviewedAt": "2026-10-23T23:16:46Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. Agents inherit their own CLI authentication; this behavior passes prompts, branch names, and checkouts only."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "Dispatch, sweep, filterQueue, run, and the sandbox lifecycle log entry and outcome with structured placeholders, including agent, branch, exit code, and sandbox path. Agent stderr is capped in the log and no secret values are logged."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "gitStrict throws with the command and stderr; branchConflict returns null only for a missing git binary (a later gitStrict call then fails with the real error); dispatchOne catches an agent failure into a result with stderr and exit code; sandbox cleanup failures are logged as warnings instead of masking the run result."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "issue",
+      "note": "agent_task_test.ts covers the pure helpers and the new model plumbing well (normalizeBdIssue, skipReason, matchWorkdir, sandbox naming/verdicts, buildAgentInvocation for all four agents with and without a model, and the candidate model round-trip), but the core dispatch/sweep/filterQueue/sandbox methods have no injected-command unit tests and are exercised only through workflow integration. Non-blocking; follow-up is warranted for a behavior that force-resets checkouts."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "Re-runs are intentionally guarded rather than blindly idempotent: setupBranch and createSandbox refuse an existing local/remote branch, a dirty checkout, or an existing sandbox path, so a partial failure cannot silently reset or overwrite work. Failed sandboxes are kept for inspection and pruneSandboxes provides teardown."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "na",
+      "note": "No HTTP API. The behavior contracts with git, bd, and the agent CLIs; non-zero exits and unparseable bd JSON are surfaced rather than assumed away."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Subprocesses use awaited output(); the sandbox worktree is removed after a successful run unless keepSandbox is set, kept on failure with a warning, and pruneSandboxes offers the recovery path. Failed or kept sandboxes accumulate by design so the operator can inspect them."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "issue",
+      "note": "src/agent_task_test.ts:131-146 embeds the real personal path /home/mhw/dev/myswamp in sandbox-name fixtures. Use a generic placeholder such as /home/user/repo. Non-blocking: test-only, pre-existing."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); the new optional model field is declared on RunResult, Candidate, DispatchResult, and the method argument schemas."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "Run/per-candidate resources use bounded lifetimes and garbageCollection, and the latest manifest/sweep summaries are retained for operator inspection."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle model: it is a dispatcher/projection over the bd ready queue plus an explicit sandbox maintenance surface (sandboxes/pruneSandboxes)."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "pass",
+      "note": "The git-usable check is declared and dispatch/sweep also fail fast on a non-git checkout, a dirty tree, or an existing branch. bd and the agent CLI are invoked directly and their failures are surfaced in the result rather than preflighted; that is acceptable because each run records stderr and exit code."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "Instance names are derived with sanitizeInstanceName from stable branch/issue identifiers and per-candidate resources are unique; the manifest and sweep summaries intentionally overwrite their current records."
+    },
+    {
+      "id": "data-access",
+      "verdict": "pass",
+      "note": "The behavior writes its own dispatch/manifest/sandbox resources and does not read back unrelated stored state; the caller-facing run method returns its outcome directly and through a resource."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Bumped to 2026.10.23.1 with an upgrades entry for the optional model input and its propagation through run/dispatch/sweep/filterQueue, candidate manifests, agent invocations, and results, on top of the 2026.10.22.1 checkout-lifecycle entry."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — every writeResource payload matches its spec; the new model field is written in run, dispatch, sweep, and manifest candidate records, and sandbox/result fields are populated on their real paths. No placeholder writes.",
+    "truncation-honesty": "pass — filterQueue enforces maxItems/BD_READY_LIMIT and the manifest records truncated=true when the ready queue or candidate list was capped.",
+    "instance-name-consistency": "pass — one writer per instance name, with sanitized stable names and current-record semantics for manifest/sweep summaries.",
+    "schema-field-coverage": "pass — all declared fields have a producing path, including optional model, sandbox, sandboxRemoved, and the sandbox inspection fields."
+  }
+}

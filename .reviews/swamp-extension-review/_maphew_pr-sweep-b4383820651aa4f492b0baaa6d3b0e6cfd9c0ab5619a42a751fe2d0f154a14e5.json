@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/pr-sweep",
+  "version": "2026.10.23.1",
+  "reviewedAt": "2026-10-23T23:16:46Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credentials or tokens are stored or logged. gh/git authenticate themselves; the behavior passes repo slugs, PR numbers, prompts, and workdirs only."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "List/review/sync/summary steps and the preflight log with structured placeholders (repo, batch size, PR count, missing tool). Agent stderr is not logged verbatim as a secret-bearing blob."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "This release adds checkToolAvailable/preflightTools, which fail fast naming a missing git/gh/agent binary before a step instead of surfacing an opaque mid-sweep subprocess failure; a non-zero --version exit still counts as present. The verdict-file read catch is deliberately narrow (agent may write nothing; stdout parsing still applies), and runModel/agent failures throw rather than being swallowed."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "pr_sweep_test.ts covers batching, queue/explicit repo-pair resolution, normalizeRun defaults and model propagation, verdict tallying, the composable method surface, and the new preflight checks with an injected probe. End-to-end gh/agent flows remain workflow integration tests."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "The composable steps are re-runnable: list refreshes open PRs, review writes per-PR results, sync re-reads state, and verdict/summary overwrite current resources. Per-PR instance names keep a re-run from mixing results across PRs."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "gh/git CLI output is parsed defensively (derivePrState tolerates missing fields; unreadable PR state falls back to UNKNOWN_PR_STATE), and the new preflight validates the binaries before their output is relied on."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "The review verdict temp dir is removed in a finally block (best effort), subprocesses use awaited output(), and no long-lived handles are created. Per-PR worktrees are owned by the agent-task dispatch layer."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "issue",
+      "note": "src/pr_sweep_test.ts:216 embeds the real personal path /home/mhwilkie/dev/kilo-cloud in a parseRemoteRepo fixture. Use a generic placeholder such as /home/user/repo. Non-blocking: test-only, pre-existing."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); the optional model field is declared on the pair/step settings and result schemas."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "Open-PR, per-PR, sweep, and summary resources declare bounded lifetimes and garbageCollection; the summary/current records are retained for operator inspection."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle model: it is a run-based review/sync pipeline with composable steps and a one-call sweep convenience."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "pass",
+      "note": "The new preflightTools checks git, gh, and (when needed) the selected agent in list, review, and sync, and fails with the missing tool's name before any step runs."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "open-prs uses a fixed current instance, per-PR resources use prInstanceName(upstreamRepo, number), and sweep/summary use stable current names; no shape collisions."
+    },
+    {
+      "id": "data-access",
+      "verdict": "pass",
+      "note": "Steps read the stored open-PR/queue records they own via readResource and pass results forward; no direct dataRepository access."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Bumped to 2026.10.23.1 with an upgrades entry for the tool preflight, on top of the 2026.10.18.1 composable-steps entry."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — all writeResource calls match their schemas: open-prs, per-PR results, sweep summary, and run summary populate every declared field on the relevant branch. Optional fields (pendingCount, reason, syncStatus, syncDetail) have conditional producing paths. No placeholders.",
+    "truncation-honesty": "pass — open-PR and summary schemas carry truncation/pending information where a listing or batch is capped; no silent truncation.",
+    "instance-name-consistency": "pass — deterministic instance naming (open-prs constant, prInstanceName per PR, fixed sweep/summary names) with one schema shape per instance.",
+    "schema-field-coverage": "pass — every schema field has a producing path across list/review/sync/verdicts/summary and the sweep convenience."
+  }
+}

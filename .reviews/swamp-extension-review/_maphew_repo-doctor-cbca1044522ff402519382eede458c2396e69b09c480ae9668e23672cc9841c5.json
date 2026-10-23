@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/repo-doctor",
+  "version": "2026.10.23.1",
+  "reviewedAt": "2026-10-23T23:16:46Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. Global args are repo-relative paths, booleans, and binary names; no vault refs are needed."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "Structured placeholders throughout ('Scanned {files} file(s) ...', 'Checked {n} pulled extension(s) ...', 'Workflow wiring: {n} finding(s)'). No interpolation and no sensitive values."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "walk() tolerates an unreadable directory; unreadable source files are skipped as a best-effort scan; checkExtensions verifies declared additionalFiles on disk. The new workflow-wiring checks record a failed swamp/health probe as an explicit ok=false detail rather than treating it as a clean result, and Deno.Command failures are converted into that detail."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "repo_doctor_test.ts now covers the new wiring helpers: shellWords, extractScriptPaths, normalizePath, resolveScriptPath, inspectScript, extractShellInvocations, declaredScheduleOf, diffSchedules, parseWorkflowSearchJson, and parseServeHealthJson, in addition to the existing path/report/extension parsers. The orchestration methods (scan/checkWorkflowWiring against live git/gh/swamp) remain integration-tested by the workflow rather than unit-tested."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "Read-only checks; reruns are idempotent and overwrite the *-current snapshots. scan() writes outputs only after the checks complete, so a thrown check does not expose a half-written combined report."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "No external HTTP API. The workflow-wiring check parses swamp CLI JSON and a local serve /health response; malformed JSON is caught and recorded as an explicit failure detail, and non-array/irregular schedule entries are skipped rather than assumed."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Deno.readDir/readFile/stat and awaited Deno.Command.output() only; pipes are drained and no temp files or long-lived handles are created."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "issue",
+      "note": "src/repo_doctor_test.ts:243-246 embeds the real personal path /var/home/matt/dev/myswamp in a workflow-command fixture. Use a generic placeholder such as /home/user/repo or /work/repo. Non-blocking: test-only, but it is published source and this release introduced it."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); the new WorkflowWiringReportSchema, ScriptInfo, WorkflowSchedule, and ScheduleDiff schemas follow the same pattern."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "Every resource and the report file set lifetime 7d and garbageCollection 10, appropriate for a periodic health snapshot."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle model: it is an analysis scanner with no create/update/delete surface."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "na",
+      "note": "No mutating methods, so no pre-flight gate is required."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "scan() writes scan-current, paths-current, extensions-current, gitignore-current, scaffolding-current, workflow-wiring-current, and report-current; each is unique per spec and also written by the single-check methods."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "Stateless; reads no stored swamp resources and uses no dataRepository access."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Bumped to 2026.10.23.1 with a no-op upgrades entry for the workflow-wiring check and its workflowDirs/swampBin globals, on top of the 2026.10.21.1 entry."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — all writeResource payloads match their specs: scan, paths, extensions, gitignore, scaffolding, and workflowWiring populate every declared field, including the new scripts/schedules/liveSource and per-script exec/shebang fields. No placeholder writes.",
+    "truncation-honesty": "pass — no pagination or result caps; each check processes all files/findings, and command output is parsed without silently truncating the finding list.",
+    "instance-name-consistency": "pass — one writer per instance name, with stable *-current names shared by scan and the individual check methods using the same schema.",
+    "schema-field-coverage": "pass — every schema field has a producing path, including workflow-wiring's scripts, schedules, liveSource, and diffSchedules output, plus all Finding fields."
+  }
+}

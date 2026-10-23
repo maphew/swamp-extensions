@@ -83,7 +83,9 @@ export async function checkToolAvailable(
  */
 export async function preflightTools(
   deps: { agent?: AgentName; needsAgent?: boolean },
-  ctx: { logger: { info: (msg: string, props?: Record<string, unknown>) => void } },
+  ctx: {
+    logger: { info: (msg: string, props?: Record<string, unknown>) => void };
+  },
   probe: ToolProbe = probeTool,
 ): Promise<string[]> {
   const tools = ["git", "gh"];

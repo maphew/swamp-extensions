@@ -1,0 +1,88 @@
+{
+  "extension": "@maphew/housekeeping",
+  "version": "2026.10.23.1",
+  "reviewedAt": "2026-10-23T23:16:46Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. bdBin is a binary name or path, not a secret; no vault refs are needed."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "doCheck, the sibling scan, pruneWorktrees, unclaimStaleBeads, and cleanTemp log on entry and completion with structured placeholders. The new sibling scan logs the root, pattern, and matched count without interpolating paths into the message string."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "A missing bd binary is a warning finding rather than a silent skip, bd JSON parse failures warn and continue, checkGit throws a descriptive error, and mutation methods collect per-item failures. The new sibling scan catches an unreadable root and per-entry git failures into explanatory entries or info findings instead of aborting the audit."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "This release adds io-level tests for the sibling scan (matching flat clone, linked worktree labelling, non-git match, empty result, disabled), plus the existing check/pruneWorktrees/unclaimStaleBeads/cleanTemp dry-run and failure-path tests. Pure parser tests cover parseStatusHeader including the new unborn-branch forms. Not every git/bd failure branch is unit-tested; the workflow remains the integration path."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "check and the sibling scan are read-only and re-runnable. The mutating methods are dry-run by default, write a *-current resource, and collect failures per item rather than aborting a batch."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "No HTTP API. The scan reads git/bd CLI output whose shape is not documented; parse failures are logged or converted into explanatory entries, which is the practical drift mitigation."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Every Deno.Command is awaited through output(), so pipes are drained and closed. No temp files or long-lived handles are created; optional du/pgrep/df probes are absent-safe."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README examples use projectDir, $TMPDIR, and sibling patterns such as <repo>-*; tests use /home/me placeholders. No real hostnames, IPs, account IDs, or internal topology."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All schemas are plain z.object(...) with no .passthrough(); the new SiblingCloneSchema and SiblingsReportSchema follow the same pattern, so CEL validation works."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "All resource and file specs declare lifetime and garbageCollection: audit/git/worktrees/temp/beads/report at 7d, cleanup results at 30d, all GC 10."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Not a CRUD lifecycle behavior: it audits local state and performs explicitly gated cleanup, with no create/update/delete/sync surface."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "pass",
+      "note": "No formal check labels, but each mutating method is dry-run by default and returns the candidate list before any mutation, which is the deliberate notice-and-report guard."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "Distinct instance names per spec within a run (audit-current, git-current, worktrees-current, temp-current, beads-current, worktree-prune-current, bead-unclaim-current, temp-clean-current); repeated runs intentionally overwrite the *-current records."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "No update/delete/sync readback of stored state; methods write fresh audit resources and never read prior versions."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "Bumped to 2026.10.23.1 with a no-op upgrades entry for the sibling-clone scan and siblingPattern/includeSiblingClones globals, on top of the 2026.10.21.1 entry, so existing instances advance their typeVersion."
+    }
+  ],
+  "mechanical": {
+    "schema-write-conformance": "pass — every writeResource payload matches its target spec, including the new worktrees.siblings entry (enabled, root, pattern, entries and every SiblingClone field). No placeholder values.",
+    "truncation-honesty": "pass — no pagination or result caps; the sibling scan lists every matching directory and reports unreachable roots or git failures explicitly.",
+    "instance-name-consistency": "pass — one writer per instance name; the worktrees spec is written once by check and carries the sibling report as a nested field.",
+    "schema-field-coverage": "pass — all WorktreesReport and SiblingsReport fields have a producing path, including linkedWorktree, branch, detached, dirty counts, aheadOfBase, baseRef, and error."
+  }
+}
