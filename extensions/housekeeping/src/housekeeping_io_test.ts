@@ -341,6 +341,39 @@ Deno.test("check scans matching sibling clones for branch, dirt, and commits ahe
   });
 });
 
+Deno.test("sibling scan labels a linked worktree beside the repo, not a flat clone", async () => {
+  await withTmp(async (root) => {
+    const repo = await makeRepo(root);
+    const linked = `${root}/repo-linked`;
+    await git(repo, "worktree", "add", "-q", "-b", "wt/linked", linked);
+
+    const { ctx, rec } = makeCtx({
+      projectDir: repo,
+      includeTemp: false,
+      includeBeads: false,
+    });
+    await method("check")({}, ctx);
+
+    const worktrees = dataOf(rec, "worktrees-current") as {
+      siblings: { entries: Array<Record<string, unknown>> };
+    };
+    const entry = worktrees.siblings.entries.find((e) => e.name === "repo-linked");
+    assert(entry, "expected the linked worktree to be reported");
+    assertEquals(entry.isGitCheckout, true);
+    assertEquals(entry.linkedWorktree, true);
+    assertEquals(entry.branch, "wt/linked");
+
+    const audit = dataOf(rec, "audit-current") as {
+      findings: Array<{ message: string; detail: string }>;
+    };
+    const finding = audit.findings.find((f) =>
+      f.message.includes("Sibling clone 'repo-linked'")
+    );
+    assert(finding, "expected a sibling finding for the linked worktree");
+    assertStringIncludes(finding.detail, "git worktree remove");
+  });
+});
+
 Deno.test("sibling scan reports a non-git matching directory without failing", async () => {
   await withTmp(async (root) => {
     const repo = await makeRepo(root);

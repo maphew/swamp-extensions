@@ -89,8 +89,10 @@ The sibling-clone scan is read-only and notice-only. `git worktree list` cannot
 see clones made with `git clone <url> <dir>`, so the worktrees check also lists
 directories beside the repo that match `siblingPattern` (default `<repo>-*`) and
 reports their branch, dirty state, and commits ahead of `origin/<base>` as
-info-level findings. It never deletes or prunes them; removal stays a human
-call.
+info-level findings. Entries whose `.git` is a file are linked worktrees (or
+submodules), not flat clones, and the finding says so — remove those with `git
+worktree remove`, which also clears the administrative entry. The scan never
+deletes or prunes anything; removal stays a human call.
 
 ## Configuration
 

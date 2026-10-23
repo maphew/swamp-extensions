@@ -73,6 +73,11 @@ const SiblingCloneSchema = z.object({
   path: z.string(),
   name: z.string(),
   isGitCheckout: z.boolean(),
+  /**
+   * True when `.git` is a file, i.e. a linked worktree or a submodule checkout
+   * rather than a flat `git clone`.
+   */
+  linkedWorktree: z.boolean(),
   branch: z.string().nullable(),
   detached: z.boolean(),
   dirty: z.boolean(),
@@ -306,6 +311,14 @@ export function parseStatusHeader(line: string): {
   const rest = line.slice(3).trim();
   if (rest.startsWith("HEAD (no branch)")) {
     out.detached = true;
+    return out;
+  }
+  // An unborn branch prints `## No commits yet on <branch>` (newer git) or
+  // `## Initial commit on <branch>` (older git); the branch is not the first
+  // token there.
+  const unborn = /^(?:No commits yet on|Initial commit on) (.+)$/.exec(rest);
+  if (unborn) {
+    out.currentBranch = unborn[1].trim() || null;
     return out;
   }
   const [head, ...trackParts] = rest.split(" ");
@@ -762,6 +775,7 @@ async function checkSiblingClones(
       path,
       name,
       isGitCheckout: false,
+      linkedWorktree: false,
       branch: null,
       detached: false,
       dirty: false,
@@ -784,6 +798,14 @@ async function checkSiblingClones(
         target: path,
       });
       continue;
+    }
+
+    // `.git` is a directory in a flat clone, and a file in a linked worktree
+    // (or submodule). The two need different removal advice.
+    try {
+      entry.linkedWorktree = (await Deno.stat(`${path}/.git`)).isFile;
+    } catch {
+      entry.linkedWorktree = false;
     }
 
     const status = await run(
@@ -839,8 +861,9 @@ async function checkSiblingClones(
       category: "worktrees",
       severity: "info",
       message,
-      detail:
-        "Flat clone beside the repo, not a linked worktree. Inspect and remove by hand if stale; housekeeping never deletes siblings.",
+      detail: entry.linkedWorktree
+        ? "Linked worktree beside the repo (`.git` is a file), not a flat clone. `git worktree list` should already show it; remove with `git worktree remove` so no stale administrative entry is left behind."
+        : "Flat clone beside the repo, not a linked worktree. Inspect and remove by hand if stale; housekeeping never deletes siblings.",
       target: path,
     });
   }

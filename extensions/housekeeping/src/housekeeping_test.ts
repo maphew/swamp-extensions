@@ -53,6 +53,17 @@ Deno.test("parseStatusHeader ignores non-header lines", () => {
   assertEquals(parseStatusHeader(" M file.txt").detached, false);
 });
 
+Deno.test("parseStatusHeader reads the branch of an unborn HEAD", () => {
+  assertEquals(
+    parseStatusHeader("## No commits yet on trunk").currentBranch,
+    "trunk",
+  );
+  assertEquals(
+    parseStatusHeader("## Initial commit on main").currentBranch,
+    "main",
+  );
+});
+
 Deno.test("countStatusFiles separates modified from untracked", () => {
   assertEquals(
     countStatusFiles([" M a.ts", "?? b.ts", "?? c/", "R  old -> new"]),
