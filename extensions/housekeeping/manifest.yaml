@@ -1,10 +1,11 @@
 manifestVersion: 1
 name: "@maphew/housekeeping"
-version: 2026.10.21.1
+version: 2026.10.23.1
 description: >-
   Generic, portable housekeeping sweep for any checkout. A read-only audit of
   dirty trees, diverged or deleted branches, forgotten stashes, stale worktrees,
-  temp debris, leftover processes, disk pressure, and stuck tracker claims, plus
+  flat sibling clones, temp debris, leftover processes, disk pressure, and stuck
+  tracker claims, plus
   explicitly-gated cleanup methods that dry-run by default. Project-agnostic:
   projectDir defaults to `.`, with .beads/ and .swamp/ awareness layered on when
   present.

@@ -287,6 +287,143 @@ Deno.test("check surfaces an expired claim as a stale finding", async () => {
   });
 });
 
+Deno.test("check scans matching sibling clones for branch, dirt, and commits ahead", async () => {
+  await withTmp(async (root) => {
+    const repo = await makeRepo(root);
+    const sibling = `${root}/repo-abc`;
+    await git(root, "clone", "-q", repo, sibling);
+    await Deno.writeTextFile(`${sibling}/ahead.txt`, "ahead\n");
+    await git(sibling, "add", "-A");
+    await git(sibling, "commit", "-q", "-m", "ahead");
+    await Deno.writeTextFile(`${sibling}/untracked.txt`, "dirty\n");
+
+    const { ctx, rec } = makeCtx({
+      projectDir: repo,
+      includeTemp: false,
+      includeBeads: false,
+    });
+    await method("check")({}, ctx);
+
+    const worktrees = dataOf(rec, "worktrees-current") as {
+      total: number;
+      siblings: {
+        enabled: boolean;
+        root: string;
+        pattern: string;
+        entries: Array<Record<string, unknown>>;
+      };
+    };
+    assertEquals(worktrees.total, 1);
+    assertEquals(worktrees.siblings.enabled, true);
+    assertEquals(worktrees.siblings.pattern, "repo-*");
+    const entry = worktrees.siblings.entries.find((e) => e.name === "repo-abc");
+    assert(entry, "expected the sibling clone to be reported");
+    assertEquals(entry.isGitCheckout, true);
+    assertEquals(entry.branch, "main");
+    assertEquals(entry.dirty, true);
+    assertEquals(entry.dirtyFiles, 0);
+    assertEquals(entry.untrackedFiles, 1);
+    assertEquals(entry.aheadOfBase, 1);
+    assertEquals(entry.baseRef, "origin/main");
+
+    const audit = dataOf(rec, "audit-current") as {
+      findings: Array<{ category: string; severity: string; message: string }>;
+    };
+    const finding = audit.findings.find((f) =>
+      f.message.includes("Sibling clone 'repo-abc'")
+    );
+    assert(finding, "expected a sibling-clone finding");
+    assertEquals(finding.category, "worktrees");
+    assertEquals(finding.severity, "info");
+    assertStringIncludes(finding.message, "on 'main'");
+    assertStringIncludes(finding.message, "1 commit(s) ahead of origin/main");
+    assertStringIncludes(finding.message, "1 untracked file(s)");
+  });
+});
+
+Deno.test("sibling scan reports a non-git matching directory without failing", async () => {
+  await withTmp(async (root) => {
+    const repo = await makeRepo(root);
+    await Deno.mkdir(`${root}/repo-notes`);
+    await Deno.writeTextFile(`${root}/repo-notes/notes.txt`, "not a clone\n");
+
+    const { ctx, rec } = makeCtx({
+      projectDir: repo,
+      includeTemp: false,
+      includeBeads: false,
+    });
+    await method("check")({}, ctx);
+
+    const worktrees = dataOf(rec, "worktrees-current") as {
+      siblings: { entries: Array<Record<string, unknown>> };
+    };
+    const entry = worktrees.siblings.entries.find((e) =>
+      e.name === "repo-notes"
+    );
+    assert(entry, "expected the matching directory to be reported");
+    assertEquals(entry.isGitCheckout, false);
+    assertEquals(entry.error, "no .git entry");
+
+    const audit = dataOf(rec, "audit-current") as {
+      findings: Array<{ severity: string; message: string }>;
+    };
+    const finding = audit.findings.find((f) =>
+      f.message.includes("is not a git checkout")
+    );
+    assert(finding, "expected an info finding for the non-git directory");
+    assertEquals(finding.severity, "info");
+  });
+});
+
+Deno.test("sibling scan is an empty result when nothing matches", async () => {
+  await withTmp(async (root) => {
+    const repo = await makeRepo(root);
+    await Deno.mkdir(`${root}/unrelated`);
+
+    const { ctx, rec } = makeCtx({
+      projectDir: repo,
+      includeTemp: false,
+      includeBeads: false,
+    });
+    await method("check")({}, ctx);
+
+    const worktrees = dataOf(rec, "worktrees-current") as {
+      siblings: { enabled: boolean; pattern: string; entries: unknown[] };
+    };
+    assertEquals(worktrees.siblings.enabled, true);
+    assertEquals(worktrees.siblings.pattern, "repo-*");
+    assertEquals(worktrees.siblings.entries, []);
+  });
+});
+
+Deno.test("sibling scan can be disabled", async () => {
+  await withTmp(async (root) => {
+    const repo = await makeRepo(root);
+    await git(root, "clone", "-q", repo, `${root}/repo-abc`);
+
+    const { ctx, rec } = makeCtx({
+      projectDir: repo,
+      includeTemp: false,
+      includeBeads: false,
+      includeSiblingClones: false,
+    });
+    await method("check")({}, ctx);
+
+    const worktrees = dataOf(rec, "worktrees-current") as {
+      siblings: { enabled: boolean; entries: unknown[] };
+    };
+    assertEquals(worktrees.siblings.enabled, false);
+    assertEquals(worktrees.siblings.entries, []);
+    const audit = dataOf(rec, "audit-current") as {
+      findings: Array<{ message: string }>;
+    };
+    assert(
+      !audit.findings.some((f) => f.message.includes("Sibling clone")),
+      "disabled scan must not emit sibling findings",
+    );
+  });
+});
+
 // ---------- pruneWorktrees --------------------------------------------------
 
 Deno.test("pruneWorktrees dry-run lists a missing worktree without pruning it", async () => {

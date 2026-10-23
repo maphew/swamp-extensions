@@ -8,11 +8,13 @@
 
 import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
+  baseName,
   countStatusFiles,
   globToRegExp,
   isExpired,
   isOlderThan,
   matchesGlob,
+  parentDir,
   parseDfAvailableBytes,
   parseForEachRef,
   parseOrphans,
@@ -20,6 +22,7 @@ import {
   parseStatusHeader,
   parseWorktreeList,
   renderReport,
+  siblingPatternFor,
   versionToken,
 } from "./housekeeping.ts";
 
@@ -118,6 +121,20 @@ Deno.test("globToRegExp anchors and escapes", () => {
 Deno.test("matchesGlob handles question marks", () => {
   assertEquals(matchesGlob("tmp1", "tmp?"), true);
   assertEquals(matchesGlob("tmp12", "tmp?"), false);
+});
+
+Deno.test("siblingPatternFor defaults to '<repo>-*' and honors an override", () => {
+  assertEquals(siblingPatternFor("/home/me/myswamp"), "myswamp-*");
+  assertEquals(
+    siblingPatternFor("/home/me/myswamp/", "checkout-*"),
+    "checkout-*",
+  );
+});
+
+Deno.test("baseName and parentDir split POSIX paths", () => {
+  assertEquals(baseName("/home/me/myswamp/"), "myswamp");
+  assertEquals(parentDir("/home/me/myswamp/"), "/home/me");
+  assertEquals(parentDir("/myswamp"), "/");
 });
 
 Deno.test("isOlderThan respects the threshold", () => {

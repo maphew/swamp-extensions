@@ -79,11 +79,18 @@ work is usually safer than clobbering a live session.
 | Category    | Checks                                                                 |
 | ----------- | ---------------------------------------------------------------------- |
 | `git`       | detached HEAD, dirty/untracked tree, branch behind/deleted upstream, gone branches, stashes, local branches already merged into the mainline |
-| `worktrees` | path missing on disk (stale), git-marked prunable, locked, detached    |
+| `worktrees` | path missing on disk (stale), git-marked prunable, locked, detached; flat sibling clones beside the repo (`<repo>-*` by default), read-only |
 | `temp`      | configured globs under `$TMPDIR` + project root, age + size, stale marker |
 | `process`   | leftover processes matching `processPatterns` (default `dolt sql-server`) |
 | `disk`      | free space below 2 GiB on the project filesystem                       |
 | `beads`     | `bd` version vs `.beads/.local_version`, expired/idle in-progress claims, `bd stale`, `bd orphans`, `bd doctor --check=artifacts\|pollution\|conventions` |
+
+The sibling-clone scan is read-only and notice-only. `git worktree list` cannot
+see clones made with `git clone <url> <dir>`, so the worktrees check also lists
+directories beside the repo that match `siblingPattern` (default `<repo>-*`) and
+reports their branch, dirty state, and commits ahead of `origin/<base>` as
+info-level findings. It never deletes or prunes them; removal stays a human
+call.
 
 ## Configuration
 
@@ -101,6 +108,8 @@ Global arguments (per model instance):
 | `processPatterns` | `["dolt sql-server"]`                | `pgrep -af` patterns; empty disables                |
 | `includeBeads`    | `true`                               | Tracker checks when `.beads/` is present            |
 | `includeTemp`     | `true`                               | Temp / process / disk checks                        |
+| `includeSiblingClones` | `true`                          | Scan directories beside the repo for flat clones    |
+| `siblingPattern`  | unset → `<repo>-*`                   | Glob for sibling clone directories                  |
 
 ## Relationship to specialist extensions
 
