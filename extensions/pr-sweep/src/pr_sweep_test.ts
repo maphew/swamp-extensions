@@ -448,11 +448,21 @@ Deno.test("normalizeRun applies step defaults", () => {
   });
   assertEquals(settings, {
     agent: "kilo",
+    model: "",
     mainBranch: "main",
     swampRepoDir: undefined,
     sweeperPrompt: undefined,
     updateStrategy: "merge",
   });
+});
+
+Deno.test("normalizeRun carries a model through the step settings", () => {
+  const { settings } = normalizeRun({
+    upstreamRepo: "Kilo-Org/kilocode",
+    forkRepo: "maphew/kilocode",
+    model: "zai-coding-plan/glm-5.3",
+  });
+  assertEquals(settings.model, "zai-coding-plan/glm-5.3");
 });
 
 Deno.test("normalizeRun refuses a step with no repo pair", () => {
@@ -511,6 +521,7 @@ Deno.test("review defaults its batch and sync settings", () => {
   assertEquals(parsed.numbers, []);
   assertEquals(parsed.resyncBehind, true);
   assertEquals(parsed.updateStrategy, "merge");
+  assertEquals(parsed.model, "");
 });
 
 Deno.test("list reports its batch grouping input default", () => {

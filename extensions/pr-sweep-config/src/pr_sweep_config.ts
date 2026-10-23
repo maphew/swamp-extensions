@@ -26,6 +26,9 @@ const RepoPairSchema = z.object({
   ),
   agent: z.enum(["claude", "codex", "opencode", "kilo"]).default("kilo")
     .describe("Headless agent to run the sweep"),
+  model: z.string().default("").describe(
+    "Model for the agent in provider/model form; empty uses the agent's default",
+  ),
   mainBranch: z.string().default("main").describe(
     "Base branch to rebase and merge into",
   ),
@@ -98,13 +101,15 @@ export function renderConfigSummary(config: Config): string {
     lines.push("No repository pairs configured.");
     return lines.join("\n");
   }
-  lines.push("| Enabled | Name | Upstream | Fork | Workdir | Agent |");
-  lines.push("|---------|------|----------|------|---------|-------|");
+  lines.push("| Enabled | Name | Upstream | Fork | Workdir | Agent | Model |");
+  lines.push("|---------|------|----------|------|---------|-------|-------|");
   for (const pair of config.repoPairs) {
     lines.push(
       `| ${
         pair.enabled ? "✓" : "✗"
-      } | ${pair.name} | ${pair.upstreamRepo} | ${pair.forkRepo} | ${pair.workdir} | ${pair.agent} |`,
+      } | ${pair.name} | ${pair.upstreamRepo} | ${pair.forkRepo} | ${pair.workdir} | ${pair.agent} | ${
+        pair.model || "(default)"
+      } |`,
     );
   }
   return lines.join("\n");
@@ -132,6 +137,7 @@ async function addRepoPair(
     forkRepo: string;
     workdir: string;
     agent?: string;
+    model?: string;
     mainBranch?: string;
     swampRepoDir?: string;
     enabled?: boolean;
@@ -148,6 +154,7 @@ async function addRepoPair(
     workdir: _args.workdir,
     enabled: _args.enabled ?? true,
     agent: _args.agent as RepoPair["agent"] ?? "kilo",
+    model: _args.model ?? "",
     mainBranch: _args.mainBranch ?? "main",
     swampRepoDir: _args.swampRepoDir ?? ".",
   };
@@ -188,6 +195,7 @@ async function updateRepoPair(
     forkRepo?: string;
     workdir?: string;
     agent?: string;
+    model?: string;
     mainBranch?: string;
     swampRepoDir?: string;
   },
@@ -201,6 +209,7 @@ async function updateRepoPair(
     if (_args.forkRepo) pair.forkRepo = _args.forkRepo;
     if (_args.workdir) pair.workdir = _args.workdir;
     if (_args.agent) pair.agent = _args.agent as RepoPair["agent"];
+    if (_args.model !== undefined) pair.model = _args.model;
     if (_args.mainBranch) pair.mainBranch = _args.mainBranch;
     if (_args.swampRepoDir) pair.swampRepoDir = _args.swampRepoDir;
     await writeConfigFile(config);
@@ -215,13 +224,19 @@ async function updateRepoPair(
  */
 export const model = {
   type: "@maphew/pr-sweep-config",
-  version: "2026.10.14.1",
+  version: "2026.10.23.1",
   globalArguments: z.object({}),
   upgrades: [
     {
       toVersion: "2026.10.14.1",
       description:
         "Source moved to maphew/swamp-extensions (AGPL-3.0); no schema or method changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.23.1",
+      description:
+        "Add an optional per-pair `model` (provider/model) surfaced by addRepoPair/updateRepoPair and the summary table; empty keeps the agent's default",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -259,6 +274,9 @@ export const model = {
         ),
         agent: z.enum(["claude", "codex", "opencode", "kilo"]).default("kilo")
           .optional().describe("Headless agent"),
+        model: z.string().optional().describe(
+          "Model in provider/model form; empty uses the agent's default",
+        ),
         mainBranch: z.string().default("main").optional().describe(
           "Base branch",
         ),
@@ -294,6 +312,9 @@ export const model = {
         forkRepo: z.string().optional(),
         workdir: z.string().optional(),
         agent: z.enum(["claude", "codex", "opencode", "kilo"]).optional(),
+        model: z.string().optional().describe(
+          "Model in provider/model form; empty uses the agent's default",
+        ),
         mainBranch: z.string().optional(),
         swampRepoDir: z.string().optional(),
       }),
