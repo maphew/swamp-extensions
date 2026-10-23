@@ -78,6 +78,7 @@ owns the prompt and the batch, not the invocation.
 | `forkRepo`       | —        | Fork GitHub repo as `owner/name` (**required**)                                              |
 | `workdir`        | —        | Local checkout of the upstream repo (**required**)                                           |
 | `agent`          | `kilo`   | Headless agent to run the sweep (`claude`, `codex`, `opencode`, `kilo`)                      |
+| `model`          | —        | Model in `provider/model` form (e.g. `zai-coding-plan/glm-5.3`); empty uses the agent default or the registered pair's model |
 | `mainBranch`     | `main`   | Base branch to rebase and merge into                                                         |
 | `resyncBehind`   | `true`   | `review` only: bring the batch's behind branches up to date after the agent run               |
 | `numbers`        | all      | `review` / `sync` only: the PR numbers this call covers                                       |
@@ -85,6 +86,16 @@ owns the prompt and the batch, not the invocation.
 | `updateStrategy` | `merge`  | How to update a behind branch: merge the base in (no force-push) or rebase (force-push)      |
 | `sweeperPrompt`  | —        | Absolute path to a custom sweeper prompt (overrides the bundled prompt)                      |
 | `swampRepoDir`   | —        | Legacy fallback: if set and `<dir>/.kilo/agents/pr-sweeper.md` exists, it overrides the prompt |
+
+Every review and `sweep` invocation passes `model` through to
+`@maphew/agent-task`'s `run`, which selects the agent's model flag (`-m` for
+kilo/opencode/codex, `--model` for claude). The value is never hardcoded to a
+provider: omit it to keep the agent's configured default.
+
+A pair registered in `@maphew/pr-sweep-config` may also carry `model`. When the
+step argument is empty, `review` uses the registered pair's model, so a sweep
+can target a non-default provider without changing the operator's global
+`kilo.json`.
 
 The sweeper prompt is bundled with the extension
 (`prompts/pr-sweeper.md`), so no repo-local prompt file is required. An explicit

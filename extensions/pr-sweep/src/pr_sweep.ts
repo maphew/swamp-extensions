@@ -53,6 +53,9 @@ const RepoSchema = z.object({
   agent: z.enum(AGENT_NAMES).default("kilo").describe(
     "Headless agent to run the sweep",
   ),
+  model: z.string().default("").describe(
+    "Model for the agent in provider/model form; empty uses the agent's default",
+  ),
   mainBranch: z.string().default("main").describe(
     "Base branch to rebase and merge into",
   ),
@@ -113,6 +116,7 @@ type PrResult = z.infer<typeof PrResultSchema>;
  */
 type RunSettings = {
   agent: AgentName;
+  model: string;
   mainBranch: string;
   swampRepoDir?: string;
   sweeperPrompt?: string;
@@ -188,6 +192,7 @@ export function normalizeRun(input: StepArgsInput): {
     },
     settings: {
       agent: args.agent ?? "kilo",
+      model: args.model ?? "",
       mainBranch: args.mainBranch ?? "main",
       swampRepoDir: args.swampRepoDir,
       sweeperPrompt: args.sweeperPrompt,
@@ -389,6 +394,7 @@ async function runAgent(
   ctx: ModelContext,
   repo: Pick<Repo, "upstreamRepo" | "forkRepo" | "workdir"> & {
     agent: RunSettings["agent"];
+    model: RunSettings["model"];
     mainBranch: string;
     updateStrategy: RunSettings["updateStrategy"];
   },
@@ -420,6 +426,7 @@ async function runAgent(
         systemPrompt,
         workdir: repo.workdir,
         agent: repo.agent,
+        model: repo.model,
       },
     });
     if (!result.ok) {
@@ -1041,6 +1048,9 @@ const StepArgsBaseSchema = z.object({
   agent: z.enum(AGENT_NAMES).default("kilo").describe(
     "Headless agent for review batches",
   ),
+  model: z.string().default("").describe(
+    "Model for the agent in provider/model form; empty uses the agent's default or the registered repo pair's model",
+  ),
   mainBranch: z.string().default("main").describe(
     "Base branch to rebase and merge into",
   ),
@@ -1066,35 +1076,55 @@ async function resolveWorkdir(
   repoPair: { upstreamRepo: string; forkRepo: string },
   explicit?: string,
 ): Promise<string> {
-  if (explicit?.trim()) return explicit.trim();
-  if (!ctx.queryData) {
+  return (await resolveRepoPair(ctx, repoPair, explicit)).workdir;
+}
+
+/**
+ * Resolve the local checkout and optional model for a repo pair from an
+ * explicit argument or the pair registered in pr-sweep-config.
+ */
+async function resolveRepoPair(
+  ctx: ModelContext,
+  repoPair: { upstreamRepo: string; forkRepo: string },
+  explicit?: string,
+): Promise<{ workdir: string; model: string }> {
+  let registered: { workdir: string; model: string } | null = null;
+  if (ctx.queryData) {
+    try {
+      const rows = await ctx.queryData(
+        'modelName == "pr-sweep-config" && specName == "config"',
+      );
+      for (const raw of rows as Array<Record<string, unknown>>) {
+        const attrs = (raw.attributes ?? {}) as Record<string, unknown>;
+        const pairs = (attrs.repoPairs ?? []) as Array<Record<string, unknown>>;
+        const match = pairs.find((p) =>
+          p.upstreamRepo === repoPair.upstreamRepo &&
+          p.forkRepo === repoPair.forkRepo
+        );
+        if (match) {
+          registered = {
+            workdir: typeof match.workdir === "string"
+              ? match.workdir.trim()
+              : "",
+            model: typeof match.model === "string" ? match.model.trim() : "",
+          };
+          break;
+        }
+      }
+    } catch (err) {
+      ctx.logger.warn("Could not query pr-sweep-config for the repo pair", {
+        error: String(err),
+      });
+    }
+  }
+
+  const workdir = explicit?.trim() || registered?.workdir;
+  if (!workdir) {
     throw new Error(
       `no workdir for ${repoPair.upstreamRepo} / ${repoPair.forkRepo}: pass workdir= or register the pair in pr-sweep-config`,
     );
   }
-  try {
-    const rows = await ctx.queryData(
-      'modelName == "pr-sweep-config" && specName == "config"',
-    );
-    for (const raw of rows as Array<Record<string, unknown>>) {
-      const attrs = (raw.attributes ?? {}) as Record<string, unknown>;
-      const pairs = (attrs.repoPairs ?? []) as Array<Record<string, unknown>>;
-      const match = pairs.find((p) =>
-        p.upstreamRepo === repoPair.upstreamRepo &&
-        p.forkRepo === repoPair.forkRepo
-      );
-      if (typeof match?.workdir === "string" && match.workdir.trim()) {
-        return match.workdir;
-      }
-    }
-  } catch (err) {
-    ctx.logger.warn("Could not query pr-sweep-config for the workdir", {
-      error: String(err),
-    });
-  }
-  throw new Error(
-    `no workdir for ${repoPair.upstreamRepo} / ${repoPair.forkRepo}: pass workdir= or register the pair in pr-sweep-config`,
-  );
+  return { workdir, model: registered?.model ?? "" };
 }
 
 /** Durably read the newest `open-prs-current`, or null when absent/unparsable. */
@@ -1315,7 +1345,9 @@ async function stepReview(
     );
   }
 
-  const workdir = await resolveWorkdir(ctx, repo, args.workdir);
+  const pair = await resolveRepoPair(ctx, repo, args.workdir);
+  const workdir = pair.workdir;
+  const model = settings.model || pair.model;
   const systemPromptPath = resolveSweeperPromptPath(
     {
       swampRepoDir: settings.swampRepoDir,
@@ -1340,6 +1372,7 @@ async function stepReview(
       ...repo,
       workdir,
       agent: settings.agent,
+      model,
       mainBranch: settings.mainBranch,
       updateStrategy: settings.updateStrategy,
     },
@@ -1609,6 +1642,7 @@ async function sweepAll(
     forkRepo: args.forkRepo,
     workdir: args.workdir,
     agent: args.agent,
+    model: args.model,
     mainBranch: args.mainBranch,
     swampRepoDir: args.swampRepoDir,
     sweeperPrompt: args.sweeperPrompt,
@@ -1643,7 +1677,7 @@ async function sweepAll(
 
 export const model = {
   type: "@maphew/pr-sweep",
-  version: "2026.10.18.1",
+  version: "2026.10.23.1",
   globalArguments: z.object({}),
   upgrades: [
     {
@@ -1656,6 +1690,12 @@ export const model = {
       toVersion: "2026.10.18.1",
       description:
         "Composable steps: list / review / sync / verdicts / summary split the monolithic sweep, which remains as a convenience method. New `open-prs` queue resource and a `pending` verdict on per-PR records.",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.23.1",
+      description:
+        "Add an optional `model` to the repo pair and step arguments (and to the registered pr-sweep-config pair), passed through to every review and sweep agent invocation; empty keeps the agent's default",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

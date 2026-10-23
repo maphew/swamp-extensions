@@ -6,6 +6,7 @@ import {
   buildTaskPrompt,
   coerceWorkdirMap,
   matchWorkdir,
+  model,
   normalizeBdIssue,
   renderManifestReport,
   renderSweepReport,
@@ -205,6 +206,51 @@ Deno.test("buildAgentInvocation gives claude the full prompt positionally", () =
   ]);
 });
 
+Deno.test("buildAgentInvocation gives claude --model when a model is set", () => {
+  const inv = buildAgentInvocation("claude", {
+    prompt: "task",
+    systemPrompt: "sys",
+    workingDir: "/repo",
+    model: "zai-coding-plan/glm-5.3",
+  });
+  assertEquals(inv.args, [
+    "-p",
+    "--dangerously-skip-permissions",
+    "--model",
+    "zai-coding-plan/glm-5.3",
+    "sys\n\ntask",
+  ]);
+});
+
+Deno.test("buildAgentInvocation gives codex the prompt positionally", () => {
+  const inv = buildAgentInvocation("codex", {
+    prompt: "task",
+    systemPrompt: "sys",
+    workingDir: "/repo",
+  });
+  assertEquals(inv.args, [
+    "exec",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "sys\n\ntask",
+  ]);
+});
+
+Deno.test("buildAgentInvocation gives codex -m when a model is set", () => {
+  const inv = buildAgentInvocation("codex", {
+    prompt: "task",
+    systemPrompt: "sys",
+    workingDir: "/repo",
+    model: "gpt-5.4",
+  });
+  assertEquals(inv.args, [
+    "exec",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "-m",
+    "gpt-5.4",
+    "sys\n\ntask",
+  ]);
+});
+
 Deno.test("buildAgentInvocation splits opencode into task and system prompt", () => {
   const inv = buildAgentInvocation("opencode", {
     prompt: "task",
@@ -212,6 +258,21 @@ Deno.test("buildAgentInvocation splits opencode into task and system prompt", ()
     workingDir: "/repo",
   });
   assertEquals(inv.args, ["task", "--system-prompt=sys"]);
+});
+
+Deno.test("buildAgentInvocation gives opencode -m before the prompt", () => {
+  const inv = buildAgentInvocation("opencode", {
+    prompt: "task",
+    systemPrompt: "sys",
+    workingDir: "/repo",
+    model: "zai-coding-plan/glm-5.3",
+  });
+  assertEquals(inv.args, [
+    "-m",
+    "zai-coding-plan/glm-5.3",
+    "task",
+    "--system-prompt=sys",
+  ]);
 });
 
 Deno.test("buildAgentInvocation sends kilo the dir and full prompt", () => {
@@ -228,6 +289,69 @@ Deno.test("buildAgentInvocation sends kilo the dir and full prompt", () => {
     "--",
     "sys\n\ntask",
   ]);
+});
+
+Deno.test("buildAgentInvocation puts kilo's -m before the prompt separator", () => {
+  const inv = buildAgentInvocation("kilo", {
+    prompt: "task",
+    systemPrompt: "sys",
+    workingDir: "/repo",
+    model: "kilo/kilo-auto/efficient",
+  });
+  assertEquals(inv.args, [
+    "run",
+    "--auto",
+    "--dir",
+    "/repo",
+    "-m",
+    "kilo/kilo-auto/efficient",
+    "--",
+    "sys\n\ntask",
+  ]);
+});
+
+Deno.test("models default to empty on run, dispatch, sweep, and filterQueue", () => {
+  assertEquals(
+    model.methods.run.arguments.parse({ prompt: "x", workdir: "/repo" }).model,
+    "",
+  );
+  assertEquals(
+    model.methods.dispatch.arguments.parse({
+      workdir: "/repo",
+      branch: "bd/x",
+      task: "go",
+    }).model,
+    "",
+  );
+  assertEquals(model.methods.sweep.arguments.parse({}).model, "");
+  assertEquals(
+    model.methods.filterQueue.arguments.parse({ workdirMap: {} }).model,
+    "",
+  );
+});
+
+Deno.test("a candidate's model survives the manifest round-trip", () => {
+  const parsed = model.resources.manifest.schema.parse({
+    generatedAt: "2026-10-23T00:00:00Z",
+    base: "main",
+    agent: "kilo",
+    candidates: [{
+      id: "myswamp-xcy",
+      title: "T",
+      priority: 1,
+      issueType: "task",
+      workdir: "/repo",
+      branch: "bd/myswamp-xcy",
+      base: "main",
+      agent: "kilo",
+      model: "zai-coding-plan/glm-5.3",
+      task: "go",
+    }],
+    dropped: [],
+    unmapped: [],
+    truncated: false,
+  });
+  assertEquals(parsed.candidates[0].model, "zai-coding-plan/glm-5.3");
 });
 
 Deno.test("buildTaskPrompt names the issue and the base branch", () => {
@@ -268,6 +392,7 @@ Deno.test("renderManifestReport lists candidates and dropped reasons", () => {
       branch: "bd/myswamp-1",
       base: "main",
       agent: "kilo",
+      model: "",
       task: "go",
     }],
     dropped: [{ id: "myswamp-2", reason: "label:blocked" }],

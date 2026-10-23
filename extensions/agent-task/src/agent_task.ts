@@ -63,6 +63,8 @@ export interface Candidate {
   base: string;
   /** Headless agent to run. */
   agent: Agent;
+  /** Model for the agent, in provider/model form; empty uses the agent default. */
+  model: string;
   /** Free-form task prompt for the agent. */
   task: string;
 }
@@ -76,6 +78,9 @@ const CandidateSchema = z.object({
   branch: z.string().describe("Feature branch the agent creates"),
   base: z.string().describe("Base branch to branch from"),
   agent: AgentSchema.describe("Headless agent to run"),
+  model: z.string().default("").describe(
+    "Model for the agent in provider/model form; empty uses the agent's default",
+  ),
   task: z.string().describe("Free-form task prompt for the agent"),
 });
 
@@ -138,6 +143,8 @@ interface DispatchResult {
   base: string;
   /** Headless agent that was run. */
   agent: Agent;
+  /** Model passed to the agent, or empty when it used its default. */
+  model: string;
   /** BEADS_ACTOR exported to the agent for double-claim protection. */
   actor: string;
   /** ISO-8601 start timestamp. */
@@ -166,6 +173,9 @@ const DispatchResultSchema = z.object({
   branch: z.string().describe("Feature branch the agent created"),
   base: z.string().describe("Base branch the feature branch was cut from"),
   agent: AgentSchema.describe("Headless agent that was run"),
+  model: z.string().default("").describe(
+    "Model passed to the agent, or empty when it used its default",
+  ),
   actor: z.string().describe(
     "BEADS_ACTOR exported to the agent for double-claim protection",
   ),
@@ -370,6 +380,9 @@ const FilterArgsSchema = z.object({
   ),
   base: z.string().default("main").describe("Base branch for new branches"),
   agent: AgentSchema.default("kilo").describe("Default headless agent"),
+  model: z.string().default("").describe(
+    "Model for the agent in provider/model form; empty uses the agent's default",
+  ),
   bdCommand: z.string().default("bd").describe("Path to the beads CLI"),
   bdDir: z.string().default(".").describe(
     "Project directory containing a .beads/ database",
@@ -383,6 +396,9 @@ const DispatchArgsSchema = z.object({
   branch: z.string().min(1).describe("Feature branch to create"),
   task: z.string().min(1).describe("Task prompt for the agent"),
   agent: AgentSchema.default("kilo").describe("Headless agent binary to run"),
+  model: z.string().default("").describe(
+    "Model for the agent in provider/model form; empty uses the agent's default",
+  ),
   mainBranch: z.string().default("main").describe(
     "Base branch to branch from",
   ),
@@ -408,6 +424,9 @@ const RunArgsSchema = z.object({
   ),
   workdir: z.string().min(1).describe("Checkout the agent runs in"),
   agent: AgentSchema.default("kilo").describe("Headless agent binary to run"),
+  model: z.string().default("").describe(
+    "Model for the agent in provider/model form; empty uses the agent's default",
+  ),
   actor: z.string().default("").describe(
     "BEADS_ACTOR exported to the agent. Empty means no actor is exported, which is right for callers that do their own bookkeeping; dispatch/sweep derive one per branch.",
   ),
@@ -418,6 +437,9 @@ const RunResultSchema = z.object({
   workdir: z.string().describe("Checkout the agent ran in"),
   agent: AgentSchema.describe("Headless agent that was run"),
   binary: z.string().describe("Resolved agent binary"),
+  model: z.string().default("").describe(
+    "Model passed to the agent, or empty when it used its default",
+  ),
   actor: z.string().describe("BEADS_ACTOR exported, or empty"),
   startedAt: z.string().describe("ISO-8601 start timestamp"),
   finishedAt: z.string().describe("ISO-8601 finish timestamp"),
@@ -432,6 +454,9 @@ const RunResultSchema = z.object({
 const SweepArgsSchema = z.object({
   candidates: z.array(CandidateSchema).default([]).describe(
     "Candidates from filterQueue (wire from data.latest(...).attributes.candidates)",
+  ),
+  model: z.string().default("").describe(
+    "Model for candidates that do not carry their own; empty uses the agent's default",
   ),
   sandboxRoot: z.string().default("").describe(
     "Create a git worktree per candidate under this root; empty uses each candidate's mapped checkout",
@@ -684,33 +709,69 @@ export interface AgentInvocation {
  */
 export function buildAgentInvocation(
   agent: Agent,
-  opts: { prompt: string; systemPrompt: string; workingDir: string },
+  opts: {
+    prompt: string;
+    systemPrompt: string;
+    workingDir: string;
+    model?: string;
+  },
 ): AgentInvocation {
   const full = opts.systemPrompt
     ? `${opts.systemPrompt}\n\n${opts.prompt}`
     : opts.prompt;
+  const model = opts.model?.trim() ?? "";
   switch (agent) {
-    case "claude":
+    case "claude": {
+      const modelArgs = model ? ["--model", model] : [];
       return {
         binary: "claude",
-        args: ["-p", "--dangerously-skip-permissions", full],
+        args: [
+          "-p",
+          "--dangerously-skip-permissions",
+          ...modelArgs,
+          full,
+        ],
       };
-    case "codex":
+    }
+    case "codex": {
+      const modelArgs = model ? ["-m", model] : [];
       return {
         binary: "codex",
-        args: ["exec", "--dangerously-bypass-approvals-and-sandbox", full],
+        args: [
+          "exec",
+          "--dangerously-bypass-approvals-and-sandbox",
+          ...modelArgs,
+          full,
+        ],
       };
-    case "opencode":
+    }
+    case "opencode": {
+      const modelArgs = model ? ["-m", model] : [];
       return {
         binary: "opencode",
-        args: [opts.prompt, `--system-prompt=${opts.systemPrompt}`],
+        args: [
+          ...modelArgs,
+          opts.prompt,
+          `--system-prompt=${opts.systemPrompt}`,
+        ],
       };
+    }
     case "kilo":
-    default:
+    default: {
+      const modelArgs = model ? ["-m", model] : [];
       return {
         binary: "kilo",
-        args: ["run", "--auto", "--dir", opts.workingDir, "--", full],
+        args: [
+          "run",
+          "--auto",
+          "--dir",
+          opts.workingDir,
+          ...modelArgs,
+          "--",
+          full,
+        ],
       };
+    }
   }
 }
 
@@ -1234,16 +1295,21 @@ async function dispatchOne(
       await setupBranch(candidate, deps);
     }
 
-    deps.logger.info("Dispatching {agent} on {branch} in {workdir}", {
-      agent: candidate.agent,
-      branch: candidate.branch,
-      workdir: runCandidate.workdir,
-    });
+    deps.logger.info(
+      "Dispatching {agent} on {branch} in {workdir} (model {model})",
+      {
+        agent: candidate.agent,
+        model: candidate.model || "(default)",
+        branch: candidate.branch,
+        workdir: runCandidate.workdir,
+      },
+    );
     const result = await runAgentProcess({
       prompt: candidate.task,
       systemPrompt: runnerInstruction(runCandidate),
       workdir: runCandidate.workdir,
       agent: candidate.agent,
+      model: candidate.model,
       actor,
     }, deps);
     stdout = result.stdout;
@@ -1297,6 +1363,7 @@ async function dispatchOne(
     branch: candidate.branch,
     base: candidate.base,
     agent: candidate.agent,
+    model: candidate.model,
     actor,
     startedAt,
     finishedAt,
@@ -1361,6 +1428,7 @@ async function runAgentProcess(
     prompt: args.prompt,
     systemPrompt: args.systemPrompt,
     workingDir: args.workdir,
+    model: args.model,
   });
 
   const env: Record<string, string> = {};
@@ -1372,9 +1440,10 @@ async function runAgentProcess(
     env.TRACESTATE = deps.traceHeaders.tracestate;
   }
 
-  deps.logger.info("Running {binary} in {workdir}", {
+  deps.logger.info("Running {binary} in {workdir} (model {model})", {
     binary,
     workdir: args.workdir,
+    model: args.model || "(default)",
   });
   const result = await runCommand(binary, argv, {
     cwd: args.workdir,
@@ -1394,6 +1463,7 @@ async function runAgentProcess(
     workdir: args.workdir,
     agent: args.agent,
     binary,
+    model: args.model,
     actor: args.actor,
     startedAt,
     finishedAt,
@@ -1418,6 +1488,7 @@ function candidateFromArgs(
     branch: args.branch,
     base: args.mainBranch,
     agent: args.agent,
+    model: args.model,
     task: args.task,
   };
 }
@@ -1498,6 +1569,7 @@ async function filterQueue(
       branch,
       base: parsed.base,
       agent: parsed.agent,
+      model: parsed.model,
       task: buildTaskPrompt(issue, workdir, parsed.base),
     });
   }
@@ -1614,7 +1686,10 @@ async function sweep(
   let failed = 0;
 
   for (const candidate of parsed.candidates) {
-    const result = await dispatchOne(candidate, deps, {
+    const effective = parsed.model && !candidate.model
+      ? { ...candidate, model: parsed.model }
+      : candidate;
+    const result = await dispatchOne(effective, deps, {
       sandboxRoot: parsed.sandboxRoot,
       keepSandbox: parsed.keepSandbox,
     });
@@ -1808,7 +1883,7 @@ async function pruneSandboxes(
 /** Swamp behavior definition for agent task dispatch. */
 export const model = {
   type: "@maphew/agent-task",
-  version: "2026.10.22.1",
+  version: "2026.10.23.1",
   globalArguments: z.object({}),
   upgrades: [
     {
@@ -1833,6 +1908,12 @@ export const model = {
       toVersion: "2026.10.22.1",
       description:
         "Own the checkout lifecycle: dispatch/sweep can mint a git worktree per dispatch under sandboxRoot (removed after success, kept on failure or keepSandbox), dispatch results record the sandbox path, and new sandboxes/pruneSandboxes methods make teardown a one-command decision",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.23.1",
+      description:
+        "Add an optional `model` input to run/dispatch/sweep/filterQueue: candidates carry it through the manifest, buildAgentInvocation passes it as the agent's model flag (-m for kilo/opencode/codex, --model for claude), and results record the model used. Empty keeps the agent's configured default",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

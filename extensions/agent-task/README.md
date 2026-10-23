@@ -62,6 +62,18 @@ swamp model method run agent-task-queue run \
   --input systemPrompt="You are working in /path/to/checkout"
 ```
 
+Pass `model` (provider/model, e.g. `zai-coding-plan/glm-5.3`) to override the
+agent's configured default for that run. Empty is the default and adds no model
+flag. The flag is `-m` for `kilo`, `opencode`, and `codex`; `--model` for
+`claude`. For kilo it is placed before the `--` prompt separator.
+
+```bash
+swamp model method run agent-task-queue run \
+  --input workdir="/path/to/checkout" \
+  --input prompt="Do the thing" \
+  --input model="kilo/kilo-auto/efficient"
+```
+
 ### `filterQueue`
 
 Reads `bd ready --json`, drops issues a human must unblock (`waiting-on-user`,
@@ -76,6 +88,11 @@ swamp behavior run agent-task filterQueue \
   --input 'workdirMap={"myswamp":"/srv/myswamp","swamp-extensions":"/srv/swamp-extensions"}' \
   --input maxItems=2
 ```
+
+`filterQueue` also accepts `model`; each candidate carries it so a manifest
+round-trip does not lose the intended model. The same `model` can be passed to
+`dispatch` and `sweep` (sweep uses it only for candidates that do not carry
+their own).
 
 It writes:
 
@@ -94,7 +111,8 @@ push, and open a PR.
 swamp behavior run agent-task dispatch \
   --input workdir=/srv/kilo-cloud \
   --input branch=bd/myswamp-xcy \
-  --input task="Implement the thing described in myswamp-xcy"
+  --input task="Implement the thing described in myswamp-xcy" \
+  --input model="zai-coding-plan/glm-5.3"
 ```
 
 Every dispatch exports a distinct `BEADS_ACTOR` (`<agent>-<branch>`) so
@@ -155,6 +173,9 @@ serialized on purpose because `dispatch` force-resets its checkout.
 swamp behavior run agent-task sweep \
   --input 'candidates:json=[{"id":"myswamp-xcy", ...}]'
 ```
+
+Pass `model` to give every candidate that does not specify one a model; a
+candidate's own `model` always wins.
 
 It writes a `dispatch` resource per candidate, a `sweep` summary resource, and
 a `report` file.

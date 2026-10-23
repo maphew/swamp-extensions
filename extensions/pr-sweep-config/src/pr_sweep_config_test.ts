@@ -35,6 +35,7 @@ Deno.test("renderConfigSummary renders a table row per pair", () => {
         workdir: "/work/kilocode",
         enabled: true,
         agent: "kilo",
+        model: "zai-coding-plan/glm-5.3",
         mainBranch: "main",
         swampRepoDir: ".",
       },
@@ -46,6 +47,7 @@ Deno.test("renderConfigSummary renders a table row per pair", () => {
         workdir: "/work/other",
         enabled: false,
         agent: "codex",
+        model: "",
         mainBranch: "develop",
         swampRepoDir: ".",
       },
@@ -53,10 +55,10 @@ Deno.test("renderConfigSummary renders a table row per pair", () => {
   });
   assertStringIncludes(
     md,
-    "| ✓ | kilocode | Kilo-Org/kilocode | maphew/kilocode | /work/kilocode | kilo |",
+    "| ✓ | kilocode | Kilo-Org/kilocode | maphew/kilocode | /work/kilocode | kilo | zai-coding-plan/glm-5.3 |",
   );
   assertStringIncludes(
     md,
-    "| ✗ | other | up/other | maphew/other | /work/other | codex |",
+    "| ✗ | other | up/other | maphew/other | /work/other | codex | (default) |",
   );
 });

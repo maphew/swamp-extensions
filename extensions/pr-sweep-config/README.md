@@ -34,7 +34,8 @@ swamp model method run pr-sweep-config addRepoPair \
   --input name="kilocode" \
   --input upstreamRepo="Kilo-Org/kilocode" \
   --input forkRepo="maphew/kilocode" \
-  --input workdir="/path/to/kilocode"
+  --input workdir="/path/to/kilocode" \
+  --input model="zai-coding-plan/glm-5.3"
 
 # Read the summary
 swamp data query 'name == "summary-current"' --select content
@@ -48,6 +49,8 @@ The model takes no global arguments. Repository pairs carry:
 - `name`, `upstreamRepo`, `forkRepo`, `workdir`
 - `enabled` — include in sweeps (default `true`)
 - `agent` — headless agent (`claude`, `codex`, `opencode`, `kilo`; default `kilo`)
+- `model` — optional model in `provider/model` form (default empty = the agent's
+  configured default); `@maphew/pr-sweep` passes it to the agent invocation
 - `mainBranch` — base branch (default `main`)
 - `swampRepoDir` — swamp repo that owns the workflow (default `.`)
 
