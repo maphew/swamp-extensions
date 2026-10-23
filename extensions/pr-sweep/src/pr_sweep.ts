@@ -36,6 +36,63 @@ import { z } from "npm:zod@4";
 export const AGENT_NAMES = ["claude", "codex", "opencode", "kilo"] as const;
 export type AgentName = typeof AGENT_NAMES[number];
 
+/**
+ * Probe one executable and return its exit code, or `null` when the binary is
+ * not on PATH. Injected in tests so the preflight is testable without the real
+ * tools installed.
+ */
+export type ToolProbe = (tool: string) => Promise<number | null>;
+
+/** Default probe: run `<tool> --version` and read the exit code. */
+export const probeTool: ToolProbe = async (tool) => {
+  try {
+    const output = await new Deno.Command(tool, {
+      args: ["--version"],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    return output.code;
+  } catch (error) {
+    // NotFound is the only answer that means "binary missing"; a permission or
+    // cwd failure means the binary is there but unusable, which is a different
+    // (and later) error.
+    if (error instanceof Deno.errors.NotFound) return null;
+    return 0;
+  }
+};
+
+/**
+ * Fail fast, naming the tool, when a binary the sweep shells out to is absent.
+ * A non-zero `--version` exit still means the binary exists.
+ */
+export async function checkToolAvailable(
+  tool: string,
+  probe: ToolProbe = probeTool,
+): Promise<void> {
+  if ((await probe(tool)) === null) {
+    throw new Error(
+      `pr-sweep requires '${tool}' but it was not found on PATH; install it or fix PATH before sweeping`,
+    );
+  }
+}
+
+/**
+ * Verify the binaries a step depends on before it starts work: `git` and `gh`
+ * always, plus the selected headless agent when the step will run one. Keeps a
+ * missing tool from surfacing later as an opaque subprocess exit.
+ */
+export async function preflightTools(
+  deps: { agent?: AgentName; needsAgent?: boolean },
+  ctx: { logger: { info: (msg: string, props?: Record<string, unknown>) => void } },
+  probe: ToolProbe = probeTool,
+): Promise<string[]> {
+  const tools = ["git", "gh"];
+  if (deps.needsAgent) tools.push(deps.agent ?? "kilo");
+  for (const tool of tools) await checkToolAvailable(tool, probe);
+  ctx.logger.info("pr-sweep tool preflight passed", { tools });
+  return tools;
+}
+
 /** How a behind branch is brought up to date. */
 export const UPDATE_STRATEGIES = ["merge", "rebase"] as const;
 export type UpdateStrategy = typeof UPDATE_STRATEGIES[number];
@@ -1221,6 +1278,7 @@ async function stepList(
   dataHandles: Array<{ name: string }>;
 }> {
   const { repo, settings } = normalizeRun(args);
+  await preflightTools({}, ctx);
   ctx.logger.info("list: open PRs from fork in upstream", repo);
 
   let open: OpenPr[];
@@ -1293,6 +1351,10 @@ async function stepReview(
   const current = await readOpenPrs(ctx);
   const { repo, settings } = normalizeRun(
     withQueueRepoPair(args, current),
+  );
+  await preflightTools(
+    { needsAgent: true, agent: settings.agent },
+    ctx,
   );
   const byNumber = new Map<number, ListedPr>(
     (current?.prs ?? []).map((pr) => [pr.number, pr]),
@@ -1460,6 +1522,7 @@ async function stepSync(
   const { repo, settings } = normalizeRun(
     withQueueRepoPair(args, current),
   );
+  await preflightTools({}, ctx);
   const byNumber = new Map<number, ListedPr>(
     (current?.prs ?? []).map((pr) => [pr.number, pr]),
   );
