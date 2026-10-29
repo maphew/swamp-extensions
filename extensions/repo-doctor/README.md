@@ -8,16 +8,19 @@ failures, and writes both structured resources and a markdown report.
 
 - **Hardcoded absolute home paths** — `/home/<user>/...` or `/Users/<user>/...`
   literals in model and workflow sources. A path baked into a source breaks the
-  repo the moment it is cloned to a different machine or username.
+  repo the moment it is cloned to a different machine or username. Test sources
+  (`_test.ts`) are skipped by default, and `/home/linuxbrew` is treated as a
+  tool location rather than a person.
 - **Pulled-extension integrity** — extensions listed in the lockfile whose
   source files are missing (the types resolve but blow up at run time).
 - **`.gitignore` coverage** — generated `.swamp/` artifacts that are not
   ignored.
 - **Workflow wiring** — helper scripts invoked by workflow command/shell steps
-  that are missing an executable bit or shebang, plus workflow
-  `trigger: schedule` declarations that do not match live scheduler
-  registrations (`swamp workflow search --json` and the serve `/api/v1/health`
-  endpoint when reachable).
+  that are missing an executable bit or shebang, workflow `trigger: schedule`
+  declarations that do not match live scheduler registrations, and dead step
+  dependencies: a `dependsOn` whose condition a skipped dependency cannot
+  satisfy (silent skip, green run), or a condition that runs the dependent
+  after a failed dependency whose `steps.<name>.outputs` it then dereferences.
 
 ## Install
 
@@ -35,7 +38,7 @@ swamp model create @maphew/repo-doctor repo-doctor
 | `checkExtensions`     | Pulled-extension source integrity only                     |
 | `checkGitignore`      | `.swamp/` gitignore coverage only                          |
 | `checkScaffolding`    | Typecheck the generated agent scaffolding, separately      |
-| `checkWorkflowWiring` | Script exec/shebang checks and schedule registration drift |
+| `checkWorkflowWiring` | Script exec/shebang, schedule registration drift, dead step dependencies |
 
 ```bash
 # Full audit
@@ -60,6 +63,11 @@ Global arguments (per model instance):
   portable across machines)
 - `sourceDirs` — repo-relative directories scanned for hardcoded absolute paths
   (default `["extensions/models", "workflows"]`)
+- `excludeSourceSuffixes` — path suffixes skipped by the path check; test
+  fixtures embed synthetic absolute paths on purpose (default `["_test.ts",
+  "_test.tsx"]`)
+- `allowedHomeRoots` — home roots that are standard tool locations rather than a
+  person, so matches under them are not reported (default `["/home/linuxbrew"]`)
 - `includeWorkflows` — also scan `workflows/` (default `true`)
 - `scaffoldingDirs` — repo-relative dirs holding generated agent scaffolding to
   typecheck (default `[".kilo/plugins", ".opencode/plugins", ".pi/extensions"]`)
@@ -69,8 +77,10 @@ Global arguments (per model instance):
   `["workflows"]`)
 - `swampBin` — swamp executable used to read live workflow registrations
   (default `swamp`, then `$SWAMP_BIN`)
-- `serveUrl` — swamp serve base URL probed at `/api/v1/health` for live
-  schedules (default `http://127.0.0.1:9090`); unreachable is not an error
+- `serveUrl` — swamp serve base URL probed at `/api/v1/health`, then at the
+  unauthenticated `/health` liveness endpoint (an oauth-gated serve answers 401
+  on the first), for live schedules (default `http://127.0.0.1:9090`);
+  unreachable is not an error
 
 ## Output
 
@@ -107,6 +117,23 @@ or missing `swamp` binary simply falls back to the CLI view or records
 or a cron with no registration shows up as a finding. Extension-owned schedules
 (names beginning with `@`) are ignored in the undeclared direction because they
 are declared in their own package, not in this repo's `workflows/`.
+
+Two schedule notes learned the hard way: `swamp workflow search --json` reads the
+workflow YAML, so the CLI fallback reports *declared* crons and cannot see a
+stale `workflows-evaluated/` registration; and a serve running
+`--auth-mode oauth` answers 401 on `/api/v1/health`, which is why `/health` is
+probed second.
+
+The dead-dependency lint is a static heuristic, not a dataflow analysis. To avoid
+flagging the intentional shape ("skip every apply step in diagnosis mode"), it
+does not report a dependent that has a guard mirroring the dependency's guard and
+that never reads the dependency. It does report an unguarded dependent of a
+skippable step, and a guarded dependent whose different guard reads
+`steps.<dep>`. Reading outputs through the optional chain
+(`steps.?x.?outputs.?attr.orValue(default)`) is always treated as safe.
+`workflow-failure-dereference` is an `error`; `workflow-dead-dependency` is a
+`warning`, so it surfaces in the report without failing a workflow that gates on
+`errorCount`.
 
 ## License
 

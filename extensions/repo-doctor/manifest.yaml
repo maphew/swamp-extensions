@@ -1,13 +1,14 @@
 manifestVersion: 1
 name: "@maphew/repo-doctor"
-version: 2026.10.23.1
+version: 2026.10.29.1
 description: >-
   Repository hygiene checks for swamp repos — hardcoded absolute home paths in
-  model/workflow sources, pulled extensions whose source files are missing,
-  generated .swamp artifacts not covered by .gitignore, and workflow wiring
-  drift (scripts missing an exec bit/shebang, declared schedules with no live
-  registration). Writes a combined markdown report plus per-check structured
-  resources.
+  model/workflow sources (test fixtures and the Linuxbrew prefix exempted),
+  pulled extensions whose source files are missing, generated .swamp artifacts
+  not covered by .gitignore, and workflow wiring drift: scripts missing an
+  exec bit/shebang, declared schedules with no live registration, and dead step
+  dependencies that skip silently or dereference the outputs of a failed step.
+  Writes a combined markdown report plus per-check structured resources.
 repository: "https://github.com/maphew/swamp-extensions.git"
 license: MIT
 paths:

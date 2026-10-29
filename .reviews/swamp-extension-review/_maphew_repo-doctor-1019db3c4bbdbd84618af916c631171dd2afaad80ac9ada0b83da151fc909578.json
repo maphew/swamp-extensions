@@ -1,0 +1,82 @@
+{
+  "extension": "@maphew/repo-doctor",
+  "version": "2026.10.29.1",
+  "reviewedAt": "2026-10-29T16:44:55Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "No credential or secret handling. New global args are string arrays (path suffixes, home roots); no vault refs, no tokens, and the serve probe sends no credentials."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "Existing structured placeholders unchanged ('Scanned {files} ...', 'Workflow wiring: {files} ... {e} error(s)'). New lint emits findings, not log lines, so nothing interpolates into a log message."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "readLiveSchedules now tries /api/v1/health then /health, records a non-2xx status or fetch error per attempt, and still falls through to the CLI view and then liveSource=none. parseServeHealthJson throwing on a scheduling-less body is caught by the same loop. YAML parse failures are unchanged. findDeadDependencies is total on malformed input: untyped conditions parse to null (succeeded), unknown condition types match nothing, and missing steps are skipped."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "43 tests, up from 28. New coverage: the allowed-home-root exemption, isExcludedSource, healthUrls ordering, the full conditionMatches matrix (succeeded default, always, completed, skipped, and/or/not), extractWorkflowSteps (guards, dependencies, literal-false guard), and seven findDeadDependencies scenarios including mirrored guards, aggregated dependencies, transitive skippability, and optional-chain safety. Filesystem-walking methods and the live health probe remain integration-only, consistent with the previous review."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "All checks are read-only and rerun identically; the two new checks are pure functions of the parsed YAML and the local filesystem. No writes outside the existing resources and report file."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "pass",
+      "note": "One outbound surface: GET {serveUrl}/api/v1/health, now followed by GET {serveUrl}/health when the first is not 2xx. Both are swamp serve endpoints; the second exists because an --auth-mode oauth serve answers 401 on the first. Each attempt has a 1.5s AbortSignal timeout and any failure degrades to the CLI/none source rather than throwing. Verified live: /api/v1/health 401, /health 200 with a scheduling.schedules block."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "pass",
+      "note": "Fetch responses are read as text and released; the timeout signal covers each call. No temp files, no open files (inspectScript already closes in a finally), no unbounded loops beyond the step fixpoint, which is O(steps^2) on a workflow-sized input."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "New fixtures use /home/alice and /home/linuxbrew only; no real operator paths, hostnames, or account identifiers. README examples stay generic (extensions/models, workflows/)."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "GlobalArgsSchema gains excludeSourceSuffixes and allowedHomeRoots as plain z.array(z.string()) with defaults; no passthrough and no schema change to the existing resources. New findings reuse the existing six-field FindingSchema, so CEL paths and scan aggregates are unchanged."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "No new resources or specs; workflow-wiring-current keeps the instance's existing 7d lifetime and GC 10. Findings are written into that same resource and report file."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "Analysis scanner with no create/update/delete surface."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "pass",
+      "note": "scan() calls checkWorkflowWiring, so the dead-dependency lint and the /health fallback run as part of the combined audit. Verified against this repo's 18 workflows: two genuine workflow-dead-dependency warnings (terminal-keymap-setup, filed as myswamp-pvsb) and zero errors after the test-fixture and Linuxbrew exemptions removed the 21 previous false positives."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "workflowWiring -> workflow-wiring-current remains the only writer of that spec, from both scan and checkWorkflowWiring with the same schema."
+    },
+    {
+      "id": "data-access",
+      "verdict": "pass",
+      "note": "Reads local files and the serve HTTP endpoint only; no swamp data.* reads or cross-instance lookups."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "pass",
+      "note": "2026.10.23.1 -> 2026.10.29.1 is additive: new optional global args with defaults, new findings in an existing resource, no schema or argument removal, so existing instances keep working. The consuming instance typeVersion is bumped in myswamp after pull; no upgrades entry is used by this package."
+    }
+  ]
+}

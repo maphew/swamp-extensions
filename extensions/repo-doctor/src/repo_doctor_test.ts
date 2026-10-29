@@ -6,12 +6,17 @@
 
 import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
+  conditionMatches,
   declaredScheduleOf,
   diffSchedules,
   extractScriptPaths,
   extractShellInvocations,
+  extractWorkflowSteps,
+  findDeadDependencies,
+  healthUrls,
   inspectScript,
   isCovered,
+  isExcludedSource,
   isScaffoldingSource,
   normalizePath,
   offendingLines,
@@ -400,4 +405,374 @@ Deno.test("parseServeHealthJson reads scheduling.schedules", () => {
   assertEquals(parseServeHealthJson(raw), [
     { workflow: "a", file: null, cron: "0 1 * * *" },
   ]);
+});
+
+Deno.test("offendingLines exempts allowed home roots", () => {
+  const text = [
+    "const path = '/home/linuxbrew/.linuxbrew/bin';",
+    "const other = '/home/linuxbrew/notes';",
+    "const user = '/home/alice/work';",
+  ].join("\n");
+  const hits = offendingLines(text, { allowedHomeRoots: ["/home/linuxbrew"] });
+  assertEquals(hits.length, 1);
+  assertEquals(hits[0].match, "/home/alice");
+});
+
+Deno.test("isExcludedSource matches configured suffixes", () => {
+  assertEquals(isExcludedSource("extensions/models/a_test.ts", ["_test.ts"]), true);
+  assertEquals(isExcludedSource("extensions/models/a.ts", ["_test.ts"]), false);
+  assertEquals(isExcludedSource("extensions/models/a.ts", [""]), false);
+});
+
+Deno.test("healthUrls probes the API endpoint before the liveness endpoint", () => {
+  assertEquals(healthUrls("http://127.0.0.1:9090"), [
+    "http://127.0.0.1:9090/api/v1/health",
+    "http://127.0.0.1:9090/health",
+  ]);
+  assertEquals(healthUrls("http://127.0.0.1:9090/"), [
+    "http://127.0.0.1:9090/api/v1/health",
+    "http://127.0.0.1:9090/health",
+  ]);
+});
+
+Deno.test("conditionMatches mirrors the executor's condition semantics", () => {
+  assertEquals(conditionMatches(null, "succeeded"), true);
+  assertEquals(conditionMatches(null, "failed"), false);
+  assertEquals(conditionMatches(null, "skipped"), false);
+  assertEquals(conditionMatches({ type: "always" }, "skipped"), true);
+  assertEquals(conditionMatches({ type: "completed" }, "failed"), true);
+  assertEquals(conditionMatches({ type: "completed" }, "skipped"), false);
+  assertEquals(conditionMatches({ type: "skipped" }, "skipped"), true);
+  assertEquals(
+    conditionMatches({
+      type: "or",
+      conditions: [{ type: "completed" }, { type: "skipped" }],
+    }, "skipped"),
+    true,
+  );
+  assertEquals(
+    conditionMatches({
+      type: "and",
+      conditions: [{ type: "completed" }, { type: "skipped" }],
+    }, "skipped"),
+    false,
+  );
+  assertEquals(
+    conditionMatches({
+      type: "not",
+      condition: { type: "succeeded" },
+    }, "failed"),
+    true,
+  );
+});
+
+Deno.test("extractWorkflowSteps reads guards, conditions, and expressions", () => {
+  const workflow = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        {
+          name: "steer",
+          guard: "${{ inputs.steer == false }}",
+          task: { type: "model_method", inputs: { note: "${{ inputs.note }}" } },
+        },
+        {
+          name: "analyze",
+          dependsOn: [{ step: "steer", condition: { type: "completed" } }],
+          task: { type: "model_method" },
+        },
+      ],
+    }],
+  };
+  const steps = extractWorkflowSteps(workflow);
+  assertEquals(steps.length, 2);
+  assertEquals(steps[0].guarded, true);
+  assertEquals(steps[0].expressions.includes("${{ inputs.steer == false }}"), true);
+  assertEquals(steps[1].guarded, false);
+  assertEquals(steps[1].dependsOn, [{
+    step: "steer",
+    condition: { type: "completed" },
+  }]);
+});
+
+Deno.test("findDeadDependencies flags a skippable dependency under completed", () => {
+  const workflow = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        {
+          name: "steer",
+          guard: "${{ inputs.steer == false }}",
+          task: { type: "manual_approval" },
+        },
+        {
+          name: "analyze",
+          dependsOn: [{ step: "steer", condition: { type: "completed" } }],
+          task: { type: "model_method" },
+        },
+      ],
+    }],
+  };
+  const findings = findDeadDependencies(workflow);
+  assertEquals(findings.length, 1);
+  assertEquals(findings[0].check, "workflow-dead-dependency");
+  assertEquals(findings[0].severity, "warning");
+  assertEquals(findings[0].step, "analyze");
+  assertEquals(findings[0].dependency, "steer");
+});
+
+Deno.test("findDeadDependencies propagates skippability transitively", () => {
+  const workflow = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        { name: "collect", task: { type: "model_method" } },
+        {
+          name: "steer",
+          dependsOn: [{ step: "collect", condition: { type: "succeeded" } }],
+          guard: "${{ inputs.steer == false }}",
+          task: { type: "manual_approval" },
+        },
+        {
+          name: "analyze",
+          dependsOn: [{ step: "steer", condition: { type: "succeeded" } }],
+          task: { type: "model_method" },
+        },
+        {
+          name: "record",
+          dependsOn: [{ step: "analyze", condition: { type: "succeeded" } }],
+          task: { type: "model_method" },
+        },
+      ],
+    }],
+  };
+  const findings = findDeadDependencies(workflow);
+  assertEquals(findings.map((f) => f.step), ["analyze", "record"]);
+});
+
+Deno.test("findDeadDependencies accepts skipped/always conditions on skippable steps", () => {
+  const workflow = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        {
+          name: "steer",
+          guard: "${{ inputs.steer == false }}",
+          task: { type: "manual_approval" },
+        },
+        {
+          name: "analyze",
+          dependsOn: [{
+            step: "steer",
+            condition: {
+              type: "or",
+              conditions: [{ type: "completed" }, { type: "skipped" }],
+            },
+          }],
+          task: { type: "model_method" },
+        },
+        {
+          name: "report",
+          dependsOn: [{ step: "steer", condition: { type: "always" } }],
+          task: { type: "model_method" },
+        },
+      ],
+    }],
+  };
+  assertEquals(findDeadDependencies(workflow), []);
+});
+
+Deno.test("findDeadDependencies flags a failed-dependency output dereference", () => {
+  const workflow = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        { name: "analyze", task: { type: "model_method" } },
+        {
+          name: "record",
+          dependsOn: [{ step: "analyze", condition: { type: "completed" } }],
+          task: {
+            type: "model_method",
+            inputs: { analysis: "${{ steps.analyze.outputs.text }}" },
+          },
+        },
+      ],
+    }],
+  };
+  const findings = findDeadDependencies(workflow);
+  assertEquals(findings.length, 1);
+  assertEquals(findings[0].check, "workflow-failure-dereference");
+  assertEquals(findings[0].severity, "error");
+  assertEquals(findings[0].step, "record");
+});
+
+Deno.test("findDeadDependencies ignores safe failure paths", () => {
+  const succeeded = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        { name: "analyze", task: { type: "model_method" } },
+        {
+          name: "record",
+          dependsOn: [{ step: "analyze", condition: { type: "succeeded" } }],
+          task: {
+            type: "model_method",
+            inputs: { analysis: "${{ steps.analyze.outputs.text }}" },
+          },
+        },
+      ],
+    }],
+  };
+  assertEquals(findDeadDependencies(succeeded), []);
+
+  const optional = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        { name: "analyze", task: { type: "model_method" } },
+        {
+          name: "record",
+          dependsOn: [{ step: "analyze", condition: { type: "completed" } }],
+          task: {
+            type: "model_method",
+            inputs: {
+              analysis:
+                '${{ steps.?analyze.?outputs.?text.orValue("") }}',
+            },
+          },
+        },
+      ],
+    }],
+  };
+  assertEquals(findDeadDependencies(optional), []);
+});
+
+Deno.test("findDeadDependencies ignores mirrored guards that never read the dependency", () => {
+  const workflow = {
+    jobs: [{
+      name: "apply",
+      steps: [
+        {
+          name: "approve-plan",
+          guard: "${{ !inputs.apply }}",
+          task: { type: "manual_approval" },
+        },
+        {
+          name: "write-config",
+          dependsOn: [{ step: "approve-plan", condition: { type: "succeeded" } }],
+          guard: "${{ !inputs.apply }}",
+          task: { type: "model_method" },
+        },
+      ],
+    }],
+  };
+  assertEquals(findDeadDependencies(workflow), []);
+});
+
+Deno.test("findDeadDependencies flags a guarded dependent that reads a skippable dependency", () => {
+  const workflow = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        {
+          name: "steer",
+          guard: "${{ !inputs.steer }}",
+          task: { type: "manual_approval" },
+        },
+        {
+          name: "analyze",
+          dependsOn: [{ step: "steer", condition: { type: "completed" } }],
+          guard: "${{ steps.steer.status == 'skipped' }}",
+          task: { type: "model_method" },
+        },
+      ],
+    }],
+  };
+  const findings = findDeadDependencies(workflow);
+  assertEquals(findings.length, 1);
+  assertEquals(findings[0].check, "workflow-dead-dependency");
+  assertEquals(findings[0].step, "analyze");
+});
+
+Deno.test("findDeadDependencies flags an unguarded dependent of a skippable step", () => {
+  const workflow = {
+    jobs: [{
+      name: "verify",
+      steps: [
+        {
+          name: "assert-font",
+          guard: "${{ !inputs.apply }}",
+          task: { type: "assert", expr: "true" },
+        },
+        {
+          name: "press-test",
+          dependsOn: [{ step: "assert-font", condition: { type: "succeeded" } }],
+          task: { type: "manual_approval" },
+        },
+      ],
+    }],
+  };
+  const findings = findDeadDependencies(workflow);
+  assertEquals(findings.length, 1);
+  assertEquals(findings[0].step, "press-test");
+  assertEquals(findings[0].dependency, "assert-font");
+});
+
+Deno.test("findDeadDependencies aggregates several dead dependencies per step", () => {
+  const workflow = {
+    jobs: [{
+      name: "verify",
+      steps: [
+        { name: "a", guard: "${{ !inputs.apply }}", task: { type: "assert" } },
+        { name: "b", guard: "${{ !inputs.apply }}", task: { type: "assert" } },
+        {
+          name: "press-test",
+          dependsOn: [
+            { step: "a", condition: { type: "succeeded" } },
+            { step: "b", condition: { type: "succeeded" } },
+          ],
+          task: { type: "manual_approval" },
+        },
+      ],
+    }],
+  };
+  const findings = findDeadDependencies(workflow);
+  assertEquals(findings.length, 1);
+  assertEquals(findings[0].dependency, "a, b");
+});
+
+Deno.test("findDeadDependencies ignores a guarded dependent with a mirrored guard", () => {
+  const guard = "${{ inputs.analyze == false }}";
+  const workflow = {
+    jobs: [{
+      name: "retro",
+      steps: [
+        { name: "analyze", guard, task: { type: "model_method" } },
+        {
+          name: "record",
+          dependsOn: [{ step: "analyze", condition: { type: "succeeded" } }],
+          guard: "${{  inputs.analyze == false }}",
+          task: {
+            type: "model_method",
+            inputs: { analysis: "${{ steps.analyze.outputs.text }}" },
+          },
+        },
+      ],
+    }],
+  };
+  assertEquals(findDeadDependencies(workflow), []);
+});
+
+Deno.test("extractWorkflowSteps treats a literal-false guard as non-skippable", () => {
+  const steps = extractWorkflowSteps({
+    jobs: [{
+      name: "j",
+      steps: [
+        { name: "always", guard: "${{ false }}", task: { type: "model_method" } },
+        { name: "literal", guard: false, task: { type: "model_method" } },
+        { name: "skip", guard: true, task: { type: "model_method" } },
+      ],
+    }],
+  });
+  assertEquals(steps.map((step) => step.guarded), [false, false, true]);
 });

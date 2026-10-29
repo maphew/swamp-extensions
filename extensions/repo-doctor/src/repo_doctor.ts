@@ -9,15 +9,18 @@
  *   - pulled extensions whose source files are missing (the types resolve in
  *     the lockfile but blow up at run time)
  *   - `.swamp/` artifacts that are not covered by `.gitignore`
- *   - workflow-invoked scripts that are missing an exec bit or shebang, and
- *     workflow schedules that do not match live scheduler registrations
+ *   - workflow-invoked scripts that are missing an exec bit or shebang,
+ *     workflow schedules that do not match live scheduler registrations, and
+ *     step dependencies that can silently skip their dependent or dereference
+ *     the outputs of a failed step
  *
  * Methods:
  *   - `scan`       run every check and write a combined report
  *   - `findPaths`  hardcoded absolute-path findings only
  *   - `checkExtensions`  pulled-extension integrity only
  *   - `checkGitignore`   .swamp/ gitignore coverage only
- *   - `checkWorkflowWiring`  script exec/shebang and schedule registration drift
+ *   - `checkWorkflowWiring`  script exec/shebang, schedule registration drift,
+ *                            and dead step dependencies
  *
  * @module
  */
@@ -137,6 +140,17 @@ const GlobalArgsSchema = z.object({
     "extensions/models",
     "workflows",
   ]).describe("Repo-relative directories scanned for hardcoded absolute paths"),
+  excludeSourceSuffixes: z.array(z.string()).default([
+    "_test.ts",
+    "_test.tsx",
+  ]).describe(
+    "Path suffixes skipped by the hardcoded-home-path check; test fixtures embed synthetic absolute paths on purpose",
+  ),
+  allowedHomeRoots: z.array(z.string()).default([
+    "/home/linuxbrew",
+  ]).describe(
+    "Home roots that are standard tool locations rather than a person (the Linuxbrew prefix); matches under them are not reported",
+  ),
   includeWorkflows: z.boolean().default(true).describe(
     "Also scan workflows/ for hardcoded absolute paths",
   ),
@@ -157,7 +171,7 @@ const GlobalArgsSchema = z.object({
     "swamp executable used to read live workflow registrations; falls back to SWAMP_BIN",
   ),
   serveUrl: z.string().default("http://127.0.0.1:9090").describe(
-    "swamp serve base URL probed for live schedules via /api/v1/health; unreachable is not an error",
+    "swamp serve base URL probed for live schedules at /api/v1/health, then the unauthenticated /health; unreachable is not an error",
   ),
 });
 
@@ -244,21 +258,32 @@ export function relative(projectDir: string, abs: string): string {
  * current machine — and a path left behind by a previous machine is precisely
  * the case that breaks on someone else's clone.
  *
- * Documentation-style references are excluded by requiring the path to be
- * followed by a real directory-ish segment or end at a path boundary.
+ * `allowedHomeRoots` exempts home roots that are standard tool locations rather
+ * than a person, so the Linuxbrew prefix does not read as a portability bug.
  */
 export function offendingLines(
   text: string,
+  options: { allowedHomeRoots?: string[] } = {},
 ): Array<{ line: number; match: string; text: string }> {
+  const allowed = new Set(options.allowedHomeRoots ?? []);
   const out: Array<{ line: number; match: string; text: string }> = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const current = lines[i];
     for (const match of current.matchAll(HOME_PATH_RE)) {
+      if (allowed.has(match[0])) continue;
       out.push({ line: i + 1, match: match[0], text: current.trim() });
     }
   }
   return out;
+}
+
+/** True when a source path is excluded by a configured suffix. */
+export function isExcludedSource(
+  path: string,
+  suffixes: string[],
+): boolean {
+  return suffixes.some((suffix) => suffix !== "" && path.endsWith(suffix));
 }
 
 async function findHardcodedPaths(
@@ -277,6 +302,7 @@ async function findHardcodedPaths(
   for (const dir of walkDirs) {
     for await (const abs of walk(`${cfg.projectDir}/${dir}`)) {
       if (!/\.(ts|tsx|js|mjs|yaml|yml|json|md)$/.test(abs)) continue;
+      if (isExcludedSource(abs, cfg.excludeSourceSuffixes)) continue;
       scannedFiles++;
       let text: string;
       try {
@@ -284,7 +310,11 @@ async function findHardcodedPaths(
       } catch {
         continue;
       }
-      for (const hit of offendingLines(text)) {
+      for (
+        const hit of offendingLines(text, {
+          allowedHomeRoots: cfg.allowedHomeRoots,
+        })
+      ) {
         findings.push({
           check: "hardcoded-home-path",
           severity: "error",
@@ -712,6 +742,313 @@ export function declaredScheduleOf(workflow: unknown): string | null {
     : null;
 }
 
+/**
+ * A `dependsOn` condition, mirroring the executor's matcher: `always`,
+ * `succeeded` (the default when omitted), `failed`, `completed` (succeeded or
+ * failed), `skipped`, `and`, `or`, and `not`.
+ */
+export interface DependencyCondition {
+  type: string;
+  conditions?: DependencyCondition[];
+  condition?: DependencyCondition;
+}
+
+function parseCondition(raw: unknown): DependencyCondition | null {
+  if (!isRecord(raw) || typeof raw.type !== "string") return null;
+  const condition: DependencyCondition = { type: raw.type };
+  if (Array.isArray(raw.conditions)) {
+    condition.conditions = raw.conditions
+      .map((entry) => parseCondition(entry))
+      .filter((entry): entry is DependencyCondition => entry !== null);
+  }
+  if (isRecord(raw.condition)) {
+    const nested = parseCondition(raw.condition);
+    if (nested) condition.condition = nested;
+  }
+  return condition;
+}
+
+export type StepStatus = "succeeded" | "failed" | "skipped";
+
+/**
+ * Evaluate a dependency condition against a step status. A missing condition
+ * behaves as `succeeded`, matching the executor.
+ */
+export function conditionMatches(
+  condition: DependencyCondition | null,
+  status: StepStatus,
+): boolean {
+  if (condition === null) return status === "succeeded";
+  switch (condition.type) {
+    case "always":
+      return true;
+    case "succeeded":
+      return status === "succeeded";
+    case "failed":
+      return status === "failed";
+    case "completed":
+      return status === "succeeded" || status === "failed";
+    case "skipped":
+      return status === "skipped";
+    case "and":
+      return (condition.conditions ?? []).every((entry) =>
+        conditionMatches(entry, status)
+      );
+    case "or":
+      return (condition.conditions ?? []).some((entry) =>
+        conditionMatches(entry, status)
+      );
+    case "not":
+      return condition.condition === undefined
+        ? true
+        : !conditionMatches(condition.condition, status);
+    default:
+      return false;
+  }
+}
+
+/** Render a condition for a finding message. */
+export function describeCondition(
+  condition: DependencyCondition | null,
+): string {
+  if (condition === null) return "succeeded";
+  switch (condition.type) {
+    case "and":
+      return (condition.conditions ?? []).map(describeCondition).join(" and ");
+    case "or":
+      return (condition.conditions ?? []).map(describeCondition).join(" or ");
+    case "not":
+      return `not ${
+        condition.condition ? describeCondition(condition.condition) : "?"
+      }`;
+    default:
+      return condition.type;
+  }
+}
+
+/** One step's dependency shape, as needed by the dead-dependency lint. */
+export interface WorkflowStepInfo {
+  job: string;
+  name: string;
+  guarded: boolean;
+  guardText: string | null;
+  dependsOn: Array<{ step: string; condition: DependencyCondition | null }>;
+  expressions: string[];
+}
+
+function collectStrings(value: unknown, out: string[]): void {
+  if (typeof value === "string") {
+    out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectStrings(entry, out);
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const entry of Object.values(value)) collectStrings(entry, out);
+}
+
+/**
+ * Whether a guard can skip the step. `guard: true` always skips; a literal
+ * false expression never does, so it is not a source of skippability.
+ */
+function isGuardSkippable(guard: unknown): boolean {
+  if (guard === undefined || guard === null || guard === false) return false;
+  if (typeof guard === "string") {
+    const compact = guard.replace(/\s+/g, "");
+    return compact !== "" && compact !== "false" && compact !== "${{false}}";
+  }
+  return true;
+}
+
+/** Extract every step and the expressions that can dereference `steps.*`. */
+export function extractWorkflowSteps(workflow: unknown): WorkflowStepInfo[] {
+  const steps: WorkflowStepInfo[] = [];
+  if (!isRecord(workflow) || !Array.isArray(workflow.jobs)) return steps;
+
+  for (const job of workflow.jobs) {
+    if (!isRecord(job) || !Array.isArray(job.steps)) continue;
+    const jobName = typeof job.name === "string" ? job.name : "job";
+    for (const step of job.steps) {
+      if (!isRecord(step) || typeof step.name !== "string") continue;
+
+      const dependsOn: WorkflowStepInfo["dependsOn"] = [];
+      if (Array.isArray(step.dependsOn)) {
+        for (const dep of step.dependsOn) {
+          if (!isRecord(dep) || typeof dep.step !== "string") continue;
+          dependsOn.push({
+            step: dep.step,
+            condition: parseCondition(dep.condition),
+          });
+        }
+      }
+
+      const expressions: string[] = [];
+      if (typeof step.guard === "string") expressions.push(step.guard);
+      if (typeof step.in === "string") expressions.push(step.in);
+      if (typeof step.description === "string") {
+        expressions.push(step.description);
+      }
+      collectStrings(step.task, expressions);
+
+      steps.push({
+        job: jobName,
+        name: step.name,
+        guarded: isGuardSkippable(step.guard),
+        guardText: typeof step.guard === "string" ? step.guard : null,
+        dependsOn,
+        expressions,
+      });
+    }
+  }
+  return steps;
+}
+
+/** True when an expression references `steps.<step>` directly (not optional). */
+export function referencesStep(
+  expressions: string[],
+  step: string,
+): boolean {
+  const escaped = escapeRegExp(step);
+  return expressions.some((expression) =>
+    new RegExp(`steps\\.${escaped}\\.`).test(expression)
+  );
+}
+
+/** True when an expression dereferences `steps.<step>.outputs` directly. */
+export function referencesStepOutputs(
+  expressions: string[],
+  step: string,
+): boolean {
+  const escaped = escapeRegExp(step);
+  const re = new RegExp(`steps\\.${escaped}\\.outputs\\b`);
+  return expressions.some((expression) => re.test(expression));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Whitespace-insensitive guard text, so mirrored guards compare equal. */
+function guardKey(guard: string | null): string | null {
+  return guard === null ? null : guard.replace(/\s+/g, "");
+}
+
+export interface DependencyFinding {
+  check: "workflow-dead-dependency" | "workflow-failure-dereference";
+  severity: "warning" | "error";
+  step: string;
+  dependency: string;
+  message: string;
+  detail: string;
+}
+
+/**
+ * Static lint for the two silent dependency failure modes:
+ *
+ * 1. a dependency condition that a skipped dependency does not satisfy, so the
+ *    dependent is skipped too while the run still reports success;
+ * 2. a condition that runs the dependent after a FAILED dependency, where the
+ *    dependent dereferences `steps.<dep>.outputs` and dies with
+ *    `No such key: outputs`, burying the real error.
+ *
+ * Rule 1 deliberately ignores the common intentional shape: a dependent with
+ * its own guard that mirrors the dependency's guard ("skip everything in
+ * diagnosis mode") and that never reads the dependency cannot distinguish an
+ * intended skip from a dead dependency, so it stays quiet. A guarded dependent
+ * that DOES read the dependency is reported, because the read proves it expects
+ * the dependency to have run.
+ *
+ * Optional chaining (`steps.?x.?outputs`) is treated as safe. Rule 2 in
+ * myswamp-lc6x (unguarded reads of a possibly absent step) is deliberately left
+ * to documentation: it needs dataflow the YAML does not carry.
+ */
+export function findDeadDependencies(workflow: unknown): DependencyFinding[] {
+  const steps = extractWorkflowSteps(workflow);
+  const byName = new Map(steps.map((step) => [step.name, step]));
+
+  // Fixpoint: a step may skip if it has a guard, or if it depends on a step
+  // that may skip under a condition that a skipped dependency does not meet.
+  const maySkip = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const step of steps) {
+      if (maySkip.has(step.name)) continue;
+      const viaGuard = step.guarded;
+      const viaDependency = step.dependsOn.some((dep) =>
+        !conditionMatches(dep.condition, "skipped") && maySkip.has(dep.step)
+      );
+      if (viaGuard || viaDependency) {
+        maySkip.add(step.name);
+        changed = true;
+      }
+    }
+  }
+
+  const findings: DependencyFinding[] = [];
+  for (const step of steps) {
+    const deadDependencies = step.dependsOn.filter((dep) => {
+      if (!byName.has(dep.step)) return false;
+      if (!maySkip.has(dep.step)) return false;
+      if (conditionMatches(dep.condition, "skipped")) return false;
+      if (!step.guarded) return true;
+      // A guard of its own that mirrors the dependency's guard means the skip
+      // is the intent ("skip everything in diagnosis mode"). A guard that
+      // never reads the dependency is equally uninformative, so it stays
+      // quiet too. A *different* guard that does read the dependency is the
+      // 2026-10-26 session-retro shape: the read proves the dependent expects
+      // the dependency to have run.
+      const dependency = byName.get(dep.step);
+      const mirrored = guardKey(step.guardText) !== null &&
+        guardKey(step.guardText) === guardKey(dependency?.guardText ?? null);
+      if (mirrored) return false;
+      return referencesStep(step.expressions, dep.step);
+    });
+
+    if (deadDependencies.length > 0) {
+      const names = deadDependencies.map((dep) =>
+        `"${dep.step}" (${describeCondition(dep.condition)})`
+      ).join(", ");
+      findings.push({
+        check: "workflow-dead-dependency",
+        severity: "warning",
+        step: step.name,
+        dependency: deadDependencies.map((dep) => dep.step).join(", "),
+        message: `Step "${step.name}" requires ${names} but ${
+          deadDependencies.length === 1
+            ? "that step can be skipped"
+            : "those steps can be skipped"
+        }; the dependent is skipped too and the run still reports success`,
+        detail:
+          `Use condition "always" (or an "or" that includes "skipped") when running after a skip is intended, or remove the guard that makes the dependency skippable.`,
+      });
+    }
+
+    for (const dep of step.dependsOn) {
+      if (!byName.has(dep.step)) continue;
+      if (
+        conditionMatches(dep.condition, "failed") &&
+        referencesStepOutputs(step.expressions, dep.step)
+      ) {
+        findings.push({
+          check: "workflow-failure-dereference",
+          severity: "error",
+          step: step.name,
+          dependency: dep.step,
+          message: `Step "${step.name}" runs after "${dep.step}" fails (${
+            describeCondition(dep.condition)
+          }) and dereferences steps.${dep.step}.outputs; a failed step has no outputs, so it dies with "No such key: outputs"`,
+          detail:
+            `Use condition "succeeded" for the dependency, or read outputs through the optional chain steps.?${dep.step}.?outputs.?attr.orValue(default).`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
 export interface ScheduleDiffEntry {
   kind: "declared-unregistered" | "registered-undeclared" | "mismatch";
   workflow: string;
@@ -860,6 +1197,16 @@ async function runSwampSearch(
   }
 }
 
+/**
+ * Health endpoints probed for live schedules, in order. `/api/v1/health` is
+ * token-gated when serve runs with auth (oauth), while the liveness endpoint
+ * `/health` is not and returns the same `scheduling` block.
+ */
+export function healthUrls(serveUrl: string): string[] {
+  const base = serveUrl.replace(/\/+$/, "");
+  return [`${base}/api/v1/health`, `${base}/health`];
+}
+
 async function readLiveSchedules(
   cfg: GlobalArgs,
 ): Promise<{
@@ -867,28 +1214,34 @@ async function readLiveSchedules(
   source: LiveSource;
   detail: string | null;
 }> {
-  const healthUrl = `${cfg.serveUrl.replace(/\/+$/, "")}/api/v1/health`;
-  try {
-    const response = await fetch(healthUrl, {
-      signal: AbortSignal.timeout(1500),
-    });
-    if (response.ok) {
+  let detail: string | null = null;
+  for (const healthUrl of healthUrls(cfg.serveUrl)) {
+    try {
+      const response = await fetch(healthUrl, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!response.ok) {
+        detail = `${healthUrl} returned ${response.status}`;
+        continue;
+      }
       const text = await response.text();
       return {
         schedules: parseServeHealthJson(text),
         source: "serve",
         detail: healthUrl,
       };
+    } catch (error) {
+      detail = `${healthUrl}: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
     }
-  } catch {
-    // Serve is optional: fall through to the CLI view.
   }
 
   const cli = await runSwampSearch(cfg);
   if (cli.ok) {
     return { schedules: cli.schedules, source: "cli", detail: cli.detail };
   }
-  return { schedules: [], source: "none", detail: cli.detail };
+  return { schedules: [], source: "none", detail: cli.detail ?? detail };
 }
 
 async function checkWorkflowWiring(
@@ -927,6 +1280,17 @@ async function checkWorkflowWiring(
       const schedule = declaredScheduleOf(workflow);
       if (schedule) {
         declaredSchedules.push({ workflow: name, file, cron: schedule });
+      }
+
+      for (const finding of findDeadDependencies(workflow)) {
+        findings.push({
+          check: finding.check,
+          severity: finding.severity,
+          file,
+          line: null,
+          message: finding.message,
+          detail: finding.detail,
+        });
       }
 
       for (const invocation of extractShellInvocations(workflow)) {
