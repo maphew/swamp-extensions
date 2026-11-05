@@ -275,6 +275,46 @@ Deno.test("buildAgentInvocation gives opencode -m before the prompt", () => {
   ]);
 });
 
+Deno.test("buildAgentInvocation runs pi headlessly with its own system prompt", () => {
+  const inv = buildAgentInvocation("pi", {
+    prompt: "task",
+    systemPrompt: "sys",
+    workingDir: "/repo",
+  });
+  assertEquals(inv.binary, "pi");
+  assertEquals(inv.args, [
+    "--print",
+    "--mode",
+    "text",
+    "--system-prompt",
+    "sys",
+    "--approve",
+    "--",
+    "task",
+  ]);
+});
+
+Deno.test("buildAgentInvocation gives pi --model when a model is set", () => {
+  const inv = buildAgentInvocation("pi", {
+    prompt: "task",
+    systemPrompt: "sys",
+    workingDir: "/repo",
+    model: "kilo/kilo-auto/efficient",
+  });
+  assertEquals(inv.args, [
+    "--print",
+    "--mode",
+    "text",
+    "--model",
+    "kilo/kilo-auto/efficient",
+    "--system-prompt",
+    "sys",
+    "--approve",
+    "--",
+    "task",
+  ]);
+});
+
 Deno.test("buildAgentInvocation sends kilo the dir and full prompt", () => {
   const inv = buildAgentInvocation("kilo", {
     prompt: "task",

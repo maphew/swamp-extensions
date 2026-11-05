@@ -21,7 +21,7 @@ typed behavior operations with resources, reports, and unit-testable helpers.
 - `bd` on `PATH` for `filterQueue`, in a directory with a `.beads/` database
   (or point `bdCommand`/`bdDir` at it).
 - At least one supported headless agent binary: `claude`, `codex`, `opencode`,
-  or `kilo`.
+  `kilo`, or `pi`.
 
 `git` and `bd` are subprocess dependencies, exactly as in `@maphew/bd` and
 `@maphew/handoff`; there is no cross-behavior `runModel` dependency.
@@ -65,7 +65,7 @@ swamp model method run agent-task-queue run \
 Pass `model` (provider/model, e.g. `zai-coding-plan/glm-5.3`) to override the
 agent's configured default for that run. Empty is the default and adds no model
 flag. The flag is `-m` for `kilo`, `opencode`, and `codex`; `--model` for
-`claude`. For kilo it is placed before the `--` prompt separator.
+`claude` and `pi`. For kilo it is placed before the `--` prompt separator.
 
 ```bash
 swamp model method run agent-task-queue run \

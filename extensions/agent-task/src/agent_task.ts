@@ -41,9 +41,9 @@ import { z } from "npm:zod@4";
 // ---------- schemas ---------------------------------------------------------
 
 /** A supported headless agent binary. */
-export type Agent = "claude" | "codex" | "opencode" | "kilo";
+export type Agent = "claude" | "codex" | "opencode" | "kilo" | "pi";
 
-const AgentSchema = z.enum(["claude", "codex", "opencode", "kilo"]);
+const AgentSchema = z.enum(["claude", "codex", "opencode", "kilo", "pi"]);
 
 /** One dispatchable issue: where to work, what branch, which agent, what task. */
 export interface Candidate {
@@ -705,7 +705,10 @@ export interface AgentInvocation {
  * invocations mirror the retired `.kilo/agents/run-task.sh` reference driver:
  * claude/codex take the whole prompt positionally, opencode takes the task as
  * its argument and the instruction as `--system-prompt`, and kilo gets the
- * prompt after `--`.
+ * prompt after `--`. pi runs non-interactively with `--print`, takes the
+ * instruction as `--system-prompt`, trusts project-local context with
+ * `--approve` (the headless equivalent of the other agents' permission flags),
+ * and takes the task after `--`.
  */
 export function buildAgentInvocation(
   agent: Agent,
@@ -753,6 +756,25 @@ export function buildAgentInvocation(
           ...modelArgs,
           opts.prompt,
           `--system-prompt=${opts.systemPrompt}`,
+        ],
+      };
+    }
+    case "pi": {
+      const modelArgs = model ? ["--model", model] : [];
+      const systemPrompt = opts.systemPrompt
+        ? ["--system-prompt", opts.systemPrompt]
+        : [];
+      return {
+        binary: "pi",
+        args: [
+          "--print",
+          "--mode",
+          "text",
+          ...modelArgs,
+          ...systemPrompt,
+          "--approve",
+          "--",
+          opts.prompt,
         ],
       };
     }
