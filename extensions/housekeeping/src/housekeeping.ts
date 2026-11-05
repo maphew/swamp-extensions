@@ -1572,7 +1572,7 @@ const CleanReportSchema = z.object({
 
 export const model = {
   type: "@maphew/housekeeping",
-  version: "2026.10.23.1",
+  version: "2026.11.05.1",
   upgrades: [
     {
       toVersion: "2026.10.15.2",
@@ -1602,6 +1602,12 @@ export const model = {
       toVersion: "2026.10.23.1",
       description:
         "Add an optional read-only scan of flat sibling clones (`<repo>-*` by default) to the worktrees check and its resource schema; report branch, dirty state, and commits ahead of origin/<base> as info findings. No cleanup behaviour change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.11.05.1",
+      description:
+        "Log subprocess spawn failures at debug, naming the command, cwd, and error, instead of returning null silently; the audit result is unchanged (null stays null). No schema, method, or resource changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
