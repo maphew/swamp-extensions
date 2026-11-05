@@ -658,7 +658,16 @@ export function sandboxVerdict(opts: {
   };
 }
 
-/** Build the agent task prompt for a ready issue. */
+/**
+ * Build the agent task prompt for a ready issue.
+ *
+ * The default contract is to **land** the work: push the branch and
+ * fast-forward the base, rather than opening a pull request. A PR leaves the
+ * change invisible to the repo's own automation, and workers used to close
+ * their bd issue on PR-open, so closed work never reached the base branch
+ * (myswamp-2t7x). The issue therefore stays in_progress until the change is
+ * actually on the base branch.
+ */
 export function buildTaskPrompt(
   issue: { id: string; title: string; description: string },
   workdir: string,
@@ -667,9 +676,13 @@ export function buildTaskPrompt(
   return `Work on bd issue ${issue.id}: ${issue.title}\n\n` +
     `${issue.description}\n\n` +
     `Context: this is a swamp automation repo. Use \`bd show ${issue.id}\` ` +
-    `for full detail. When done, commit, push to origin on this branch, ` +
-    `and open a PR against ${workdir}'s ${base} branch. Run the repo's ` +
-    `quality gates (deno check / swamp model validate) before shipping.`;
+    `for full detail. When the work is verified, commit it and land it on ` +
+    `${base} (\`git push origin <branch>:${base}\`, no force-push), then ` +
+    `close the issue naming the commit. Open a pull request against ` +
+    `${workdir}'s ${base} branch only if this task explicitly asks for one. ` +
+    `Leave the issue in_progress until the change is on ${base}: an open PR ` +
+    `is not a landing. Run the repo's quality gates ` +
+    `(deno check / swamp model validate) before pushing.`;
 }
 
 /**
@@ -684,10 +697,15 @@ export function runnerInstruction(candidate: {
 }): string {
   return `You are working in ${candidate.workdir} on branch ${candidate.branch}, branched from ${candidate.base} of
 the fork \`origin\` (upstream is \`upstream\`). Do the requested task, then:
-commit your changes with a clear conventional message, push to \`origin\` on
-\`${candidate.branch}\`, and open a pull request against ${candidate.base} with \`gh pr create\`
-describing the change. Follow this repo's own AGENTS.md conventions. If you
-cannot open a PR (e.g. CI failures you cannot fix), stop and report.
+commit your changes with a clear conventional message and land them on
+\`${candidate.base}\` by pushing the branch to it
+(\`git push origin ${candidate.branch}:${candidate.base}\`). Never force-push and never
+rewrite shared history. Open a pull request with \`gh pr create\` instead only
+when the task explicitly asks for one. Follow this repo's own AGENTS.md
+conventions. Leave the bd issue in_progress until the change is on
+\`${candidate.base}\`, then close it naming the commit. If you cannot land the
+change (for example CI failures you cannot fix, or a push the remote rejects),
+stop, leave the issue in_progress, and report why.
 
 Only act on ${candidate.workdir} — do not touch swamp's control-plane repo.`;
 }

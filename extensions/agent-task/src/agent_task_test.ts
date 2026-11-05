@@ -1,4 +1,8 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert@1.0.19";
+import {
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "jsr:@std/assert@1.0.19";
 import {
   actorFor,
   branchNameFor,
@@ -128,7 +132,10 @@ Deno.test("sanitizeInstanceName keeps safe characters and strips edges", () => {
 });
 
 Deno.test("sandboxNameFor is repo plus flattened issue id", () => {
-  assertEquals(sandboxNameFor("/home/mhw/dev/myswamp", "myswamp-xcy"), "myswamp-myswamp-xcy");
+  assertEquals(
+    sandboxNameFor("/home/mhw/dev/myswamp", "myswamp-xcy"),
+    "myswamp-myswamp-xcy",
+  );
   assertEquals(sandboxNameFor("/repo/", "a/b"), "repo-a-b");
   assertEquals(sandboxNameFor("/repo", ""), "repo-task");
 });
@@ -148,10 +155,13 @@ Deno.test("sandboxPathFor resolves a relative root against the source", () => {
 });
 
 Deno.test("sandboxVerdict never removes a dirty worktree", () => {
-  assertEquals(sandboxVerdict({ dirty: true, merged: true, prState: "MERGED" }), {
-    removable: false,
-    reason: "uncommitted changes",
-  });
+  assertEquals(
+    sandboxVerdict({ dirty: true, merged: true, prState: "MERGED" }),
+    {
+      removable: false,
+      reason: "uncommitted changes",
+    },
+  );
 });
 
 Deno.test("sandboxVerdict removes merged and closed-PR worktrees", () => {
@@ -166,10 +176,13 @@ Deno.test("sandboxVerdict removes merged and closed-PR worktrees", () => {
 });
 
 Deno.test("sandboxVerdict keeps an unmerged, unclosed worktree", () => {
-  assertEquals(sandboxVerdict({ dirty: false, merged: false, prState: "OPEN" }), {
-    removable: false,
-    reason: "PR is open",
-  });
+  assertEquals(
+    sandboxVerdict({ dirty: false, merged: false, prState: "OPEN" }),
+    {
+      removable: false,
+      reason: "PR is open",
+    },
+  );
   assertEquals(sandboxVerdict({ dirty: false, merged: false, prState: null }), {
     removable: false,
     reason: "branch not merged",
@@ -405,6 +418,26 @@ Deno.test("buildTaskPrompt names the issue and the base branch", () => {
   ) {
     throw new Error(`unexpected prompt: ${prompt}`);
   }
+});
+
+Deno.test("dispatch prompts land on the base and keep the issue open until then", () => {
+  const prompt = buildTaskPrompt(
+    { id: "myswamp-1", title: "T", description: "D" },
+    "/repo",
+    "main",
+  );
+  const instruction = runnerInstruction({
+    workdir: "/repo",
+    branch: "bd/myswamp-1",
+    base: "main",
+  });
+  for (const text of [prompt, instruction]) {
+    assertStringIncludes(text, "in_progress until the change is on");
+  }
+  assertStringIncludes(prompt, "git push origin <branch>:main");
+  assertStringIncludes(instruction, "git push origin bd/myswamp-1:main");
+  assertStringIncludes(instruction, "only");
+  assertStringIncludes(instruction, "when the task explicitly asks for one");
 });
 
 Deno.test("runnerInstruction names the branch and forbids the control repo", () => {
