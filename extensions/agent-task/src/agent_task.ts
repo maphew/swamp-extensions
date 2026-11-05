@@ -2008,6 +2008,12 @@ export const model = {
         "Add an optional `model` input to run/dispatch/sweep/filterQueue: candidates carry it through the manifest, buildAgentInvocation passes it as the agent's model flag (-m for kilo/opencode/codex, --model for claude), and results record the model used. Empty keeps the agent's configured default",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
+    {
+      toVersion: "2026.11.05.1",
+      description:
+        "Add `pi` as a dispatchable agent (headless `pi --print --mode text`, instruction via --system-prompt, --model for the model flag). Change the dispatch contract from opening a PR to landing on the base, keep the bd issue in_progress until the change is on the base, and verify with branchLanded() that origin/<base> contains the candidate branch before reporting success or removing the sandbox",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
   ],
   checks: {
     "git-usable": {
