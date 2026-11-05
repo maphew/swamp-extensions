@@ -21,21 +21,22 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "jsr:@std/assert@1.0.19";
-import { model } from "./housekeeping.ts";
+import { model, run } from "./housekeeping.ts";
 
 // ---------- harness ---------------------------------------------------------
 
 type Recorded = {
   resources: Array<{ spec: string; instance: string; data: unknown }>;
   files: Array<{ instance: string; text: string }>;
-  logs: Array<{ level: string; msg: string }>;
+  logs: Array<{ level: string; msg: string; props?: Record<string, unknown> }>;
 };
 
 function makeCtx(globalArgs: Record<string, unknown>) {
   const rec: Recorded = { resources: [], files: [], logs: [] };
-  const logFor = (level: string) => (msg: string) => {
-    rec.logs.push({ level, msg });
-  };
+  const logFor =
+    (level: string) => (msg: string, props?: Record<string, unknown>) => {
+      rec.logs.push({ level, msg, props });
+    };
   const ctx = {
     globalArgs,
     writeResource: (spec: string, instance: string, data: unknown) => {
@@ -357,7 +358,9 @@ Deno.test("sibling scan labels a linked worktree beside the repo, not a flat clo
     const worktrees = dataOf(rec, "worktrees-current") as {
       siblings: { entries: Array<Record<string, unknown>> };
     };
-    const entry = worktrees.siblings.entries.find((e) => e.name === "repo-linked");
+    const entry = worktrees.siblings.entries.find((e) =>
+      e.name === "repo-linked"
+    );
     assert(entry, "expected the linked worktree to be reported");
     assertEquals(entry.isGitCheckout, true);
     assertEquals(entry.linkedWorktree, true);
@@ -661,4 +664,34 @@ Deno.test("cleanTemp with force removes the non-empty directory too", async () =
     assertEquals(data.failed, []);
     await assertRejects(() => Deno.stat(oldDir), Deno.errors.NotFound);
   });
+});
+
+Deno.test("run logs a spawn failure and still returns null", async () => {
+  const logs: Array<
+    { level: string; msg: string; props?: Record<string, unknown> }
+  > = [];
+  const logger = {
+    info: () => {},
+    warn: () => {},
+    debug: (msg: string, props?: Record<string, unknown>) => {
+      logs.push({ level: "debug", msg, props });
+    },
+  };
+
+  const result = await run(
+    ["swamp-no-such-binary-9d3f", "--version"],
+    undefined,
+    logger,
+  );
+
+  assertEquals(result, null);
+  assertEquals(logs.length, 1);
+  assertEquals(logs[0].level, "debug");
+  assertStringIncludes(logs[0].msg, "Command failed to spawn");
+  assertEquals(logs[0].props?.cmd, "swamp-no-such-binary-9d3f --version");
+  assert(
+    typeof logs[0].props?.error === "string" &&
+      (logs[0].props.error as string).length > 0,
+    "the spawn error message is recorded",
+  );
 });

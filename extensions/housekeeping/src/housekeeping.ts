@@ -239,10 +239,19 @@ type CmdResult = { stdout: string; stderr: string; code: number };
 
 // ---------- pure helpers ----------------------------------------------------
 
-/** Run a command, returning a null result when the binary is missing. */
-async function run(
+/**
+ * Run a command, returning a null result when the binary is missing.
+ *
+ * The null return is deliberate (a missing `du`/`pgrep` means "feature not
+ * available", not "check failed"), but it used to be indistinguishable from a
+ * permission, cwd, or spawn failure. `logger` makes the difference visible:
+ * a spawn failure is logged at debug with the command line and the error
+ * message, and callers still see null.
+ */
+export async function run(
   cmd: string[],
   cwd?: string,
+  logger?: Logger,
 ): Promise<CmdResult | null> {
   try {
     // swamp-quality-ignore deno-command
@@ -257,14 +266,23 @@ async function run(
       stderr: new TextDecoder().decode(output.stderr),
       code: output.code,
     };
-  } catch {
+  } catch (err) {
+    logger?.debug?.("Command failed to spawn: {cmd}", {
+      cmd: cmd.join(" "),
+      cwd: cwd ?? null,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }
 
 /** Command stdout on success, otherwise null. */
-async function stdout(cmd: string[], cwd?: string): Promise<string | null> {
-  const result = await run(cmd, cwd);
+async function stdout(
+  cmd: string[],
+  cwd?: string,
+  logger?: Logger,
+): Promise<string | null> {
+  const result = await run(cmd, cwd, logger);
   return result && result.code === 0 ? result.stdout : null;
 }
 
@@ -571,17 +589,20 @@ async function resolveProjectDir(projectDir: string): Promise<string> {
 async function detectDefaultBranch(
   dir: string,
   override?: string,
+  logger?: Logger,
 ): Promise<string> {
   if (override) return override;
   const head = await stdout(
     ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     dir,
+    logger,
   );
   if (head) return head.trim().replace(/^origin\//, "");
   for (const candidate of ["main", "master", "trunk", "develop"]) {
     const ok = await run(
       ["git", "show-ref", "--verify", "--quiet", `refs/heads/${candidate}`],
       dir,
+      logger,
     );
     if (ok && ok.code === 0) return candidate;
   }
@@ -591,12 +612,14 @@ async function detectDefaultBranch(
 async function checkGit(
   dir: string,
   defaultBranch: string,
+  logger?: Logger,
 ): Promise<{ report: GitReport; findings: Finding[] }> {
   const findings: Finding[] = [];
 
   const status = await run(
     ["git", "status", "--porcelain=v1", "--branch"],
     dir,
+    logger,
   );
   if (!status || status.code !== 0) {
     throw new Error(
@@ -616,6 +639,7 @@ async function checkGit(
         "refs/heads",
       ],
       dir,
+      logger,
     )) ?? "",
   );
 
@@ -623,12 +647,14 @@ async function checkGit(
     (await stdout(
       ["git", "stash", "list", "--format=%gd|%ci|%s"],
       dir,
+      logger,
     )) ?? "",
   );
 
   const mergedRaw = await stdout(
     ["git", "branch", "--merged", defaultBranch, "--format=%(refname:short)"],
     dir,
+    logger,
   );
   if (mergedRaw === null) {
     findings.push({
@@ -741,6 +767,7 @@ async function checkSiblingClones(
   dir: string,
   defaultBranch: string,
   cfg: GlobalArgs,
+  logger?: Logger,
 ): Promise<{ report: SiblingsReport; findings: Finding[] }> {
   const findings: Finding[] = [];
   if (!cfg.includeSiblingClones) {
@@ -811,6 +838,7 @@ async function checkSiblingClones(
     const status = await run(
       ["git", "status", "--porcelain=v1", "--branch"],
       path,
+      logger,
     );
     if (!status || status.code !== 0) {
       entry.error = (status?.stderr || "git status failed").trim() ||
@@ -840,6 +868,7 @@ async function checkSiblingClones(
     const aheadOut = await stdout(
       ["git", "rev-list", "--count", `${baseRef}..HEAD`],
       path,
+      logger,
     );
     if (aheadOut !== null) {
       const parsed = Number(aheadOut.trim());
@@ -878,9 +907,14 @@ async function checkWorktrees(
   dir: string,
   defaultBranch: string,
   cfg: GlobalArgs,
+  logger?: Logger,
 ): Promise<{ report: WorktreesReport; findings: Finding[] }> {
   const findings: Finding[] = [];
-  const raw = await stdout(["git", "worktree", "list", "--porcelain"], dir);
+  const raw = await stdout(
+    ["git", "worktree", "list", "--porcelain"],
+    dir,
+    logger,
+  );
   const worktrees = raw ? parseWorktreeList(raw) : [];
   for (const wt of worktrees) {
     wt.pathExists = await pathExists(wt.path);
@@ -919,7 +953,7 @@ async function checkWorktrees(
     });
   }
 
-  const siblings = await checkSiblingClones(dir, defaultBranch, cfg);
+  const siblings = await checkSiblingClones(dir, defaultBranch, cfg, logger);
   findings.push(...siblings.findings);
 
   return {
@@ -935,8 +969,11 @@ async function checkWorktrees(
   };
 }
 
-async function dirSizeBytes(path: string): Promise<number | null> {
-  const du = await run(["du", "-sk", path]);
+async function dirSizeBytes(
+  path: string,
+  logger?: Logger,
+): Promise<number | null> {
+  const du = await run(["du", "-sk", path], undefined, logger);
   if (du && du.code === 0) {
     const kb = Number(du.stdout.trim().split(/\s+/)[0]);
     if (Number.isFinite(kb)) return kb * 1024;
@@ -948,6 +985,7 @@ async function checkTemp(
   dir: string,
   nowMs: number,
   cfg: GlobalArgs,
+  logger?: Logger,
 ): Promise<{ report: TempReport; findings: Finding[] }> {
   const findings: Finding[] = [];
   const entries: z.infer<typeof TempEntrySchema>[] = [];
@@ -977,7 +1015,7 @@ async function checkTemp(
         path: full,
         root,
         ageHours: Math.round(ageHours * 10) / 10,
-        sizeBytes: await dirSizeBytes(full),
+        sizeBytes: await dirSizeBytes(full, logger),
         stale,
       });
     }
@@ -1000,7 +1038,7 @@ async function checkTemp(
 
   const processes: string[] = [];
   for (const pattern of cfg.processPatterns) {
-    const pgrep = await run(["pgrep", "-af", pattern]);
+    const pgrep = await run(["pgrep", "-af", pattern], undefined, logger);
     if (pgrep && pgrep.code === 0) {
       for (const line of pgrep.stdout.split("\n")) {
         if (line.trim()) processes.push(line.trim());
@@ -1017,7 +1055,7 @@ async function checkTemp(
     });
   }
 
-  const df = await run(["df", "-Pk", dir]);
+  const df = await run(["df", "-Pk", dir], undefined, logger);
   const diskFreeBytes = df && df.code === 0
     ? parseDfAvailableBytes(df.stdout)
     : null;
@@ -1068,7 +1106,7 @@ async function checkBeads(
   if (!present) return { report, findings };
 
   const bdBin = cfg.bdBin;
-  const versionOut = await stdout([bdBin, "--version"], dir);
+  const versionOut = await stdout([bdBin, "--version"], dir, logger);
   if (versionOut === null) {
     findings.push({
       category: "beads",
@@ -1107,6 +1145,7 @@ async function checkBeads(
   const inProgressOut = await stdout(
     [bdBin, "list", "--status=in_progress", "--json"],
     dir,
+    logger,
   );
   if (inProgressOut) {
     try {
@@ -1149,7 +1188,7 @@ async function checkBeads(
     });
   }
 
-  const staleOut = await stdout([bdBin, "stale", "--json"], dir);
+  const staleOut = await stdout([bdBin, "stale", "--json"], dir, logger);
   if (staleOut) {
     try {
       const parsed = JSON.parse(staleOut);
@@ -1171,7 +1210,7 @@ async function checkBeads(
     });
   }
 
-  const orphansOut = await stdout([bdBin, "orphans", "--json"], dir);
+  const orphansOut = await stdout([bdBin, "orphans", "--json"], dir, logger);
   if (orphansOut) {
     try {
       report.orphans = parseOrphans(orphansOut);
@@ -1198,6 +1237,7 @@ async function checkBeads(
     const out = await stdout(
       [bdBin, "doctor", `--check=${check}`, "--json"],
       dir,
+      logger,
     );
     if (!out) continue;
     try {
@@ -1262,7 +1302,11 @@ async function doCheck(ctx: ModelContext): Promise<{
   const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
   const dir = await resolveProjectDir(cfg.projectDir);
   const nowMs = Date.now();
-  const defaultBranch = await detectDefaultBranch(dir, cfg.defaultBranch);
+  const defaultBranch = await detectDefaultBranch(
+    dir,
+    cfg.defaultBranch,
+    ctx.logger,
+  );
 
   ctx.logger.info("Housekeeping check starting in {dir}", {
     dir,
@@ -1271,15 +1315,15 @@ async function doCheck(ctx: ModelContext): Promise<{
   });
 
   const findings: Finding[] = [];
-  const git = await checkGit(dir, defaultBranch);
+  const git = await checkGit(dir, defaultBranch, ctx.logger);
   findings.push(...git.findings);
 
-  const worktrees = await checkWorktrees(dir, defaultBranch, cfg);
+  const worktrees = await checkWorktrees(dir, defaultBranch, cfg, ctx.logger);
   findings.push(...worktrees.findings);
 
   let temp: TempReport | null = null;
   if (cfg.includeTemp) {
-    const tempResult = await checkTemp(dir, nowMs, cfg);
+    const tempResult = await checkTemp(dir, nowMs, cfg, ctx.logger);
     temp = tempResult.report;
     findings.push(...tempResult.findings);
   }
@@ -1341,6 +1385,7 @@ async function pruneWorktrees(
   args: { dryRun?: boolean; verbose?: boolean },
   ctx: ModelContext,
 ): Promise<{ dataHandles: FileHandle[] }> {
+  const logger = ctx.logger;
   const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
   const dir = await resolveProjectDir(cfg.projectDir);
   const dryRun = args.dryRun ?? true;
@@ -1351,7 +1396,11 @@ async function pruneWorktrees(
     dryRun,
   });
 
-  const raw = await stdout(["git", "worktree", "list", "--porcelain"], dir);
+  const raw = await stdout(
+    ["git", "worktree", "list", "--porcelain"],
+    dir,
+    logger,
+  );
   const worktrees = raw ? parseWorktreeList(raw) : [];
   for (const wt of worktrees) wt.pathExists = await pathExists(wt.path);
   const candidates = worktrees.filter((w) => !w.pathExists && !w.isMain);
@@ -1362,7 +1411,7 @@ async function pruneWorktrees(
   if (!dryRun) {
     const cmd = ["git", "worktree", "prune"];
     if (verbose) cmd.push("--verbose");
-    const result = await run(cmd, dir);
+    const result = await run(cmd, dir, logger);
     stdoutText = result?.stdout ?? "";
     stderrText = result?.stderr ?? "";
     code = result?.code ?? 1;
@@ -1396,6 +1445,7 @@ async function unclaimStaleBeads(
   args: { dryRun?: boolean; force?: boolean; reason?: string },
   ctx: ModelContext,
 ): Promise<{ dataHandles: FileHandle[] }> {
+  const logger = ctx.logger;
   const cfg = GlobalArgsSchema.parse(ctx.globalArgs);
   const dir = await resolveProjectDir(cfg.projectDir);
   const dryRun = args.dryRun ?? true;
@@ -1417,7 +1467,7 @@ async function unclaimStaleBeads(
     for (const claim of candidates) {
       const cmd = [bdBin, "unclaim", claim.id, "--reason", reason];
       if (force) cmd.push("--force");
-      const out = await run(cmd, dir);
+      const out = await run(cmd, dir, logger);
       if (out && out.code === 0) {
         released.push(claim.id);
       } else {
@@ -1462,7 +1512,7 @@ async function cleanTemp(
     dryRun,
   });
 
-  const tempReport = await checkTemp(dir, Date.now(), cfg);
+  const tempReport = await checkTemp(dir, Date.now(), cfg, ctx.logger);
   const candidates = tempReport.report.entries.filter((e) => e.stale);
 
   const removed: string[] = [];
