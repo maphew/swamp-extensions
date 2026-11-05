@@ -705,7 +705,9 @@ when the task explicitly asks for one. Follow this repo's own AGENTS.md
 conventions. Leave the bd issue in_progress until the change is on
 \`${candidate.base}\`, then close it naming the commit. If you cannot land the
 change (for example CI failures you cannot fix, or a push the remote rejects),
-stop, leave the issue in_progress, and report why.
+stop, leave the issue in_progress, and report why. The dispatcher checks that
+\`origin/${candidate.base}\` contains \`${candidate.branch}\`; a run that only opens a PR, or
+whose push is rejected, is recorded as not landed.
 
 Only act on ${candidate.workdir} — do not touch swamp's control-plane repo.`;
 }
@@ -1296,6 +1298,35 @@ interface SandboxOptions {
 }
 
 /** Run one agent dispatch, returning a result even when preflight fails. */
+/**
+ * Whether `branch`'s tip is contained in `origin/<base>`.
+ *
+ * Dispatch's contract is to land on the base, not to open a PR. A headless
+ * agent can exit 0 after obeying "if you cannot land, stop and report", so a
+ * clean exit is not evidence that anything arrived; treating it as success
+ * used to mark the run ok and delete its sandbox. Fetch the base and ask git
+ * whether the branch is an ancestor of it.
+ */
+export async function branchLanded(
+  opts: { workdir: string; branch: string; base: string },
+  ctx: { gitCommand: string; signal?: AbortSignal },
+): Promise<boolean> {
+  const gitCtx: GitContext = {
+    gitCommand: ctx.gitCommand,
+    workdir: opts.workdir,
+    signal: ctx.signal,
+  };
+  const fetched = await git(gitCtx, ["fetch", "--quiet", "origin", opts.base]);
+  if (fetched.code !== 0) return false;
+  const contained = await git(gitCtx, [
+    "merge-base",
+    "--is-ancestor",
+    opts.branch,
+    `origin/${opts.base}`,
+  ]);
+  return contained.code === 0;
+}
+
 async function dispatchOne(
   candidate: Candidate,
   deps: DispatchDeps,
@@ -1363,6 +1394,27 @@ async function dispatchOne(
         branch: candidate.branch,
         stderr: stderr.slice(0, 2000),
       });
+    } else {
+      const landed = await branchLanded(
+        {
+          workdir: runCandidate.workdir,
+          branch: candidate.branch,
+          base: candidate.base,
+        },
+        { gitCommand: deps.gitCommand, signal: deps.signal },
+      );
+      if (!landed) {
+        success = false;
+        const reason =
+          `${candidate.branch} is not contained in origin/${candidate.base}: ` +
+          `the run exited 0 but nothing landed, so the issue is not done.`;
+        stderr = stderr ? `${stderr}\n${reason}` : reason;
+        deps.logger.error("Dispatch did not land on {base}", {
+          branch: candidate.branch,
+          base: candidate.base,
+          workdir: runCandidate.workdir,
+        });
+      }
     }
   } catch (err) {
     stderr = err instanceof Error ? err.message : String(err);
@@ -1923,7 +1975,7 @@ async function pruneSandboxes(
 /** Swamp behavior definition for agent task dispatch. */
 export const model = {
   type: "@maphew/agent-task",
-  version: "2026.10.23.1",
+  version: "2026.11.05.1",
   globalArguments: z.object({}),
   upgrades: [
     {

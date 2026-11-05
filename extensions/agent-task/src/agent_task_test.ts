@@ -5,6 +5,7 @@ import {
 } from "jsr:@std/assert@1.0.19";
 import {
   actorFor,
+  branchLanded,
   branchNameFor,
   buildAgentInvocation,
   buildTaskPrompt,
@@ -496,5 +497,58 @@ Deno.test("renderSweepReport renders the result table", () => {
   });
   if (!report.includes("| myswamp-1 |") || !report.includes("ok")) {
     throw new Error(`unexpected report: ${report}`);
+  }
+});
+
+async function gitIn(cwd: string, ...args: string[]): Promise<string> {
+  const out = await new Deno.Command("git", {
+    args,
+    cwd,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const text = new TextDecoder();
+  if (!out.success) {
+    throw new Error(
+      `git ${args.join(" ")} failed: ${text.decode(out.stderr)}`,
+    );
+  }
+  return text.decode(out.stdout).trim();
+}
+
+Deno.test("branchLanded requires the branch to be contained in origin/<base>", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    await gitIn(root, "init", "--bare", "--initial-branch=main", "origin.git");
+    const repo = `${root}/repo`;
+    await gitIn(root, "init", "--initial-branch=main", "repo");
+    await gitIn(repo, "config", "user.email", "test@example.com");
+    await gitIn(repo, "config", "user.name", "Test");
+    await gitIn(repo, "remote", "add", "origin", `${root}/origin.git`);
+    await Deno.writeTextFile(`${repo}/f.txt`, "one");
+    await gitIn(repo, "add", "f.txt");
+    await gitIn(repo, "commit", "-m", "init");
+    await gitIn(repo, "push", "-u", "origin", "main");
+
+    const ctx = { gitCommand: "git" };
+
+    await gitIn(repo, "checkout", "-b", "bd/x");
+    await Deno.writeTextFile(`${repo}/f.txt`, "two");
+    await gitIn(repo, "commit", "-am", "work");
+
+    assertEquals(
+      await branchLanded({ workdir: repo, branch: "bd/x", base: "main" }, ctx),
+      false,
+      "an unpushed branch has not landed",
+    );
+
+    await gitIn(repo, "push", "origin", "bd/x:main");
+    assertEquals(
+      await branchLanded({ workdir: repo, branch: "bd/x", base: "main" }, ctx),
+      true,
+      "a branch pushed onto the base has landed",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
   }
 });
