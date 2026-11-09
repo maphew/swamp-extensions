@@ -67,6 +67,18 @@ agent's configured default for that run. Empty is the default and adds no model
 flag. The flag is `-m` for `kilo`, `opencode`, and `codex`; `--model` for
 `claude` and `pi`. For kilo it is placed before the `--` prompt separator.
 
+Raw `run` outcome records, including stdout and stderr, expire after one day.
+The bundled `agent-task-run-log-gc` workflow runs `swamp data gc` daily at
+04:17 in the scheduler's configured timezone, so expired raw logs are removed
+within roughly 48 hours of creation.
+It runs the repository-wide Swamp data collector, which also applies other
+resources' declared lifetimes and version limits. The scheduled workflow calls
+`collectExpiredRunData` on the `agent-task-queue` behavior; create that behavior
+instance for the schedule to run. Before its first scheduled run, inspect
+`swamp data gc --dry-run` and run `swamp data gc` interactively during a quiet
+period if the backlog is large, since collection holds a repository-wide data
+lock. Dispatch and sweep summaries have their own longer-lived resources.
+
 ```bash
 swamp model method run agent-task-queue run \
   --input workdir="/path/to/checkout" \

@@ -1,0 +1,23 @@
+id: 92b913cc-f32e-471b-a27b-73a110153880
+name: "@maphew/agent-task-run-log-gc"
+description: >-
+  Collect expired Swamp data, including one-day raw agent run logs.
+trigger:
+  schedule: "17 4 * * *"
+tags: {}
+jobs:
+  - name: main
+    description: Collect expired behavior data
+    steps:
+      - name: collect-expired-data
+        description: Apply declared Swamp data lifetimes and version limits
+        task:
+          type: model_method
+          modelIdOrName: agent-task-queue
+          methodName: collectExpiredRunData
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

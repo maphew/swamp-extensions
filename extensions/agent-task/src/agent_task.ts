@@ -1502,6 +1502,24 @@ async function run(
   return { dataHandles: [handle] };
 }
 
+async function collectExpiredRunData(
+  _args: Record<string, never>,
+  ctx: { signal: AbortSignal; logger: Logger },
+): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const result = await runCommand("swamp", ["data", "gc", "--json"], {
+    signal: ctx.signal,
+  });
+  if (!result.success) {
+    throw new Error(
+      `swamp data gc failed (exit ${result.code}): ${result.stderr.trim()}`,
+    );
+  }
+  ctx.logger.info("Collected expired swamp data", {
+    output: result.stdout.trim().slice(0, 2000),
+  });
+  return { dataHandles: [] };
+}
+
 /**
  * The process-level half of a dispatch: build the invocation, export the actor
  * and trace context, run it, capture the streams. Shared by `run` and by
@@ -1975,7 +1993,7 @@ async function pruneSandboxes(
 /** Swamp behavior definition for agent task dispatch. */
 export const model = {
   type: "@maphew/agent-task",
-  version: "2026.11.05.1",
+  version: "2026.11.08.1",
   globalArguments: z.object({}),
   upgrades: [
     {
@@ -2014,6 +2032,12 @@ export const model = {
         "Add `pi` as a dispatchable agent (headless `pi --print --mode text`, instruction via --system-prompt, --model for the model flag). Change the dispatch contract from opening a PR to landing on the base, keep the bd issue in_progress until the change is on the base, and verify with branchLanded() that origin/<base> contains the candidate branch before reporting success or removing the sandbox",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
+    {
+      toVersion: "2026.11.08.1",
+      description:
+        "Expire raw agent run logs after one day and schedule daily garbage collection",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
   ],
   checks: {
     "git-usable": {
@@ -2035,9 +2059,10 @@ export const model = {
   },
   resources: {
     run: {
-      description: "Outcome of one raw agent invocation (`run`)",
+      description:
+        "Short-lived outcome of one raw agent invocation (`run`), retained for one day",
       schema: RunResultSchema,
-      lifetime: "30d" as const,
+      lifetime: "1d" as const,
       garbageCollection: 20,
     },
     manifest: {
@@ -2103,6 +2128,12 @@ export const model = {
         "Run one headless agent on a prompt in a checkout, and nothing else: no branching, no source control, no plan. The runner primitive other extensions call through `runModel` when they own their own git workflow.",
       arguments: RunArgsSchema,
       execute: run,
+    },
+    collectExpiredRunData: {
+      description:
+        "Run swamp data garbage collection to remove resources past their declared lifetime",
+      arguments: z.object({}),
+      execute: collectExpiredRunData,
     },
     sandboxes: {
       description:

@@ -1,9 +1,12 @@
 import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
-  BUNDLED_SWEEPER_PROMPT,
+  actorForReviewRun,
   AGENT_TASK_INSTANCE,
   AGENT_TASK_TYPE,
+  agentRunFromRecord,
+  assertUsableCheckout,
   buildReviewPrompt,
+  BUNDLED_SWEEPER_PROMPT,
   checkToolAvailable,
   combineVerifyResult,
   derivePrState,
@@ -12,8 +15,13 @@ import {
   parseRemoteRepo,
   parseReportForVerdicts,
   preflightTools,
+  readAgentRunRecord,
   resolveRemoteForRepo,
   resolveSweeperPromptPath,
+  reviewRunFailed,
+  reviewSyncTargets,
+  RUN_ACTOR_PREFIX,
+  runAgent,
   TOPPED_UP_DETAIL,
   updateStrategyInstruction,
   verdictFileInstruction,
@@ -94,6 +102,21 @@ Deno.test("parseReportForVerdicts reads an undecorated hyphen PR line", () => {
 Deno.test("parseReportForVerdicts ignores a dash line that is not a verdict", () => {
   const verdicts = parseReportForVerdicts("PR #7040 — Fix the rate limiter");
   assertEquals(verdicts.size, 0);
+});
+
+Deno.test("nonterminal colon narration cannot authorize partial sync", () => {
+  const batch = [{
+    number: 42,
+    title: "Fix rate limiting",
+    headRefName: "fix-rate-limiting",
+    baseRefName: "main",
+  }];
+  const verdicts = parseReportForVerdicts("PR #42: reviewing changes");
+  assertEquals(verdicts.size, 0);
+  assertEquals(
+    reviewSyncTargets(batch, verdicts, { exitCode: 1 }),
+    [],
+  );
 });
 
 Deno.test("parseReportForVerdicts lowercases the verdict", () => {
@@ -298,7 +321,11 @@ Deno.test("updateStrategyInstruction states the merge and rebase contracts", () 
 
 Deno.test("buildReviewPrompt names the batch, strategy and verdict file", () => {
   const prompt = buildReviewPrompt(
-    { upstreamRepo: "Kilo-Org/kilocode", forkRepo: "maphew/kilocode", mainBranch: "main" },
+    {
+      upstreamRepo: "Kilo-Org/kilocode",
+      forkRepo: "maphew/kilocode",
+      mainBranch: "main",
+    },
     [{ number: 7040, title: "Fix rate limiting" }],
     { updateStrategy: "merge", verdictPath: "/tmp/v.txt" },
   );
@@ -352,7 +379,10 @@ Deno.test("resolveSweeperPromptPath honors a legacy repo-local prompt", () => {
   assertEquals(
     resolveSweeperPromptPath(
       { swampRepoDir: "/swamp" },
-      { bundled: "/bundled.md", exists: (p) => p === "/swamp/.kilo/agents/pr-sweeper.md" },
+      {
+        bundled: "/bundled.md",
+        exists: (p) => p === "/swamp/.kilo/agents/pr-sweeper.md",
+      },
     ),
     "/swamp/.kilo/agents/pr-sweeper.md",
   );
@@ -476,7 +506,10 @@ Deno.test("normalizeRun refuses a step with no repo pair", () => {
 });
 
 Deno.test("prInstanceName is stable per upstream repo and PR number", () => {
-  assertEquals(prInstanceName("Kilo-Org/kilocode", 7040), "Kilo-Org-kilocode-7040");
+  assertEquals(
+    prInstanceName("Kilo-Org/kilocode", 7040),
+    "Kilo-Org-kilocode-7040",
+  );
 });
 
 Deno.test("tallyPrs counts pending separately from skipped and failed", () => {
@@ -498,12 +531,120 @@ Deno.test("tallyPrs counts pending separately from skipped and failed", () => {
 });
 
 Deno.test("tallyPrs counts an unknown verdict as pending", () => {
-  assertEquals(tallyPrs([{ number: 1, title: "a", verdict: "unknown" }]).pendingCount, 1);
+  assertEquals(
+    tallyPrs([{ number: 1, title: "a", verdict: "unknown" }]).pendingCount,
+    1,
+  );
 });
 
 Deno.test("review routes its agent through @maphew/agent-task's run primitive", () => {
   assertEquals(AGENT_TASK_TYPE, "@maphew/agent-task");
   assertEquals(AGENT_TASK_INSTANCE, "agent-task-queue");
+  assertEquals(RUN_ACTOR_PREFIX, "pr-sweep-");
+});
+
+Deno.test("review run actors retain the full UUID for collision resistance", () => {
+  const first = actorForReviewRun("01234567-89ab-cdef-0123-456789abcdef");
+  const second = actorForReviewRun("01234567-fedc-ba98-7654-fedcba987654");
+  assertEquals(first === second, false);
+  assertEquals(first, "pr-sweep-01234567-89ab-cdef-0123-456789abcdef");
+});
+
+Deno.test("missing agent run records do not discard durable verdicts", () => {
+  const verdictFileText = "PR #7040: merged";
+  assertEquals(agentRunFromRecord(undefined, verdictFileText), {
+    stdout: "",
+    stderr: "",
+    exitCode: 1,
+    runnerError: "agent-task run record was unavailable",
+    verdictFileText,
+  });
+});
+
+Deno.test("runner errors fail reviews and prevent branch sync", () => {
+  const batch = [
+    { number: 1, title: "one", headRefName: "one", baseRefName: "main" },
+    { number: 2, title: "two", headRefName: "two", baseRefName: "main" },
+  ];
+  const verdicts = new Map([[1, { verdict: "reviewed" }]]);
+  assertEquals(reviewRunFailed({ exitCode: 0, runnerError: "" }), true);
+  assertEquals(
+    reviewSyncTargets(batch, verdicts, {
+      exitCode: 0,
+      runnerError: "dependency unavailable",
+    }),
+    [],
+  );
+  assertEquals(
+    reviewSyncTargets(batch, verdicts, { exitCode: 1 }),
+    [batch[0]],
+  );
+});
+
+Deno.test("agent run lookup queries only the actor's record", async () => {
+  let predicate = "";
+  const record = await readAgentRunRecord({
+    queryData: async (query) => {
+      predicate = query;
+      return [{ name: "run-pr-sweep-actor", attributes: { exitCode: 0 } }];
+    },
+  }, "pr-sweep-actor");
+  assertEquals(
+    predicate,
+    'modelName == "agent-task-queue" && specName == "run" && name == "run-pr-sweep-actor"',
+  );
+  assertEquals(record?.attributes?.exitCode, 0);
+});
+
+Deno.test("runAgent preserves verdicts when the runner reports failure", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "pr-sweep-runner-test-" });
+  const systemPromptPath = `${tempDir}/system-prompt.md`;
+  await Deno.writeTextFile(systemPromptPath, "system prompt");
+  let verdictPath = "";
+  const run = await runAgent(
+    {
+      runModel: async (options) => {
+        const prompt = String(options.arguments?.prompt ?? "");
+        verdictPath = prompt.match(
+          /append exactly one line to `([^`]+)`/i,
+        )?.[1] ?? "";
+        if (verdictPath) {
+          await Deno.writeTextFile(verdictPath, "PR #7040: merged");
+        }
+        return { ok: false, error: { message: "" } };
+      },
+      queryData: async () => [],
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    },
+    {
+      upstreamRepo: "owner/repo",
+      forkRepo: "fork/repo",
+      workdir: `${tempDir}/repo`,
+      agent: "kilo",
+      model: "",
+      mainBranch: "main",
+      updateStrategy: "merge",
+    },
+    [{ number: 7040, title: "Fix" }],
+    systemPromptPath,
+  );
+
+  try {
+    assertEquals(verdictPath.length > 0, true);
+    assertEquals(run.exitCode, 1);
+    assertEquals(
+      run.runnerError,
+      "runModel returned failure without an error message",
+    );
+    assertEquals(run.stderr.includes("runModel returned failure"), true);
+    assertEquals(run.verdictFileText, "PR #7040: merged");
+    assertEquals(
+      parseReportForVerdicts(run.verdictFileText).get(7040)?.verdict,
+      "merged",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
 });
 
 Deno.test("the behavior exposes the composable steps and the sweep convenience", () => {
@@ -526,6 +667,40 @@ Deno.test("review defaults its batch and sync settings", () => {
 
 Deno.test("list reports its batch grouping input default", () => {
   assertEquals(model.methods.list.arguments.parse({}).batchSize, 0);
+});
+
+Deno.test("assertUsableCheckout rejects a directory outside git", async () => {
+  const workdir = await Deno.makeTempDir({ prefix: "pr-sweep-not-git-" });
+  try {
+    let message = "";
+    try {
+      await assertUsableCheckout(workdir, {
+        signal: new AbortController().signal,
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    assertEquals(message.includes("not a git work tree"), true);
+  } finally {
+    await Deno.remove(workdir, { recursive: true });
+  }
+});
+
+Deno.test("assertUsableCheckout accepts a git work tree", async () => {
+  const workdir = await Deno.makeTempDir({ prefix: "pr-sweep-git-" });
+  try {
+    const init = await new Deno.Command("git", {
+      args: ["init", workdir],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    assertEquals(init.code, 0);
+    await assertUsableCheckout(workdir, {
+      signal: new AbortController().signal,
+    });
+  } finally {
+    await Deno.remove(workdir, { recursive: true });
+  }
 });
 
 Deno.test("checkToolAvailable passes when the probe finds the tool", async () => {

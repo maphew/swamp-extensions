@@ -143,6 +143,8 @@ const SweepSummarySchema = z.object({
   pendingCount: z.number().optional().describe(
     "Listed PRs with no verdict yet",
   ),
+  agentExitCode: z.number().optional(),
+  runnerError: z.string().optional(),
   report: z.string().optional(),
   truncated: z.boolean().optional(),
 });
@@ -157,6 +159,8 @@ const PrResultSchema = z.object({
   headRefName: z.string().optional(),
   baseRefName: z.string().optional(),
   reviewedAt: z.string().optional(),
+  agentExitCode: z.number().optional(),
+  runnerError: z.string().optional(),
   merged: z.boolean().optional(),
   reason: z.string().optional(),
   state: z.string().optional(),
@@ -292,6 +296,11 @@ export const GH_PR_LIST_LIMIT = 1000;
  */
 export const AGENT_TASK_TYPE = "@maphew/agent-task";
 export const AGENT_TASK_INSTANCE = "agent-task-queue";
+export const RUN_ACTOR_PREFIX = "pr-sweep-";
+
+export function actorForReviewRun(runId: string): string {
+  return RUN_ACTOR_PREFIX + runId;
+}
 
 /** Path of the sweeper prompt bundled with the extension (see `additionalFiles`). */
 export const BUNDLED_SWEEPER_PROMPT = "prompts/pr-sweeper.md";
@@ -421,7 +430,53 @@ type AgentRun = {
   stderr: string;
   exitCode: number;
   verdictFileText: string;
+  runnerError?: string;
 };
+
+export function agentRunFromRecord(
+  record: DataRecord | undefined,
+  verdictFileText: string,
+): AgentRun {
+  const attributes = record?.attributes ?? {};
+  return {
+    stdout: typeof attributes.stdout === "string" ? attributes.stdout : "",
+    stderr: typeof attributes.stderr === "string" ? attributes.stderr : "",
+    exitCode: typeof attributes.exitCode === "number" ? attributes.exitCode : 1,
+    verdictFileText,
+    ...(!record
+      ? { runnerError: "agent-task run record was unavailable" }
+      : {}),
+  };
+}
+
+export function reviewSyncTargets(
+  batch: ListedPr[],
+  verdicts: Map<number, Verdict>,
+  run: Pick<AgentRun, "exitCode" | "runnerError">,
+): ListedPr[] {
+  if (run.runnerError) return [];
+  return run.exitCode === 0
+    ? batch
+    : batch.filter((pr) => verdicts.has(pr.number));
+}
+
+export function reviewRunFailed(
+  run: Pick<AgentRun, "exitCode" | "runnerError">,
+): boolean {
+  return run.exitCode !== 0 || run.runnerError !== undefined;
+}
+
+export async function readAgentRunRecord(
+  ctx: Pick<ModelContext, "queryData">,
+  actor: string,
+): Promise<DataRecord | undefined> {
+  if (!ctx.queryData) return undefined;
+  const name = `run-${actor}`;
+  const rows = await ctx.queryData(
+    `modelName == "${AGENT_TASK_INSTANCE}" && specName == "run" && name == "${name}"`,
+  );
+  return (rows as DataRecord[]).find((record) => record.name === name);
+}
 
 /**
  * Compose the review prompt for one batch: what to sweep, which PRs this batch
@@ -449,8 +504,8 @@ export function buildReviewPrompt(
  * timed out can still have written verdicts for the PRs it did finish, and
  * those are what the caller records.
  */
-async function runAgent(
-  ctx: ModelContext,
+export async function runAgent(
+  ctx: Pick<ModelContext, "runModel" | "queryData" | "logger">,
   repo: Pick<Repo, "upstreamRepo" | "forkRepo" | "workdir"> & {
     agent: RunSettings["agent"];
     model: RunSettings["model"];
@@ -476,43 +531,62 @@ async function runAgent(
         "review: cross-behavior calls are unavailable in this context, so the agent runner (@maphew/agent-task's `run`) cannot be reached",
       );
     }
-    const result = await ctx.runModel({
-      modelType: AGENT_TASK_TYPE,
-      name: AGENT_TASK_INSTANCE,
-      method: "run",
-      arguments: {
-        prompt: taskPrompt,
-        systemPrompt,
-        workdir: repo.workdir,
-        agent: repo.agent,
-        model: repo.model,
-      },
-    });
-    if (!result.ok) {
-      throw new Error(`agent-task run failed: ${result.error.message}`);
+    const actor = actorForReviewRun(crypto.randomUUID());
+    let runModelError: string | undefined;
+    try {
+      const result = await ctx.runModel({
+        modelType: AGENT_TASK_TYPE,
+        name: AGENT_TASK_INSTANCE,
+        method: "run",
+        arguments: {
+          prompt: taskPrompt,
+          systemPrompt,
+          workdir: repo.workdir,
+          agent: repo.agent,
+          model: repo.model,
+          actor,
+        },
+      });
+      if (!result.ok) {
+        runModelError = result.error.message ||
+          "runModel returned failure without an error message";
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      runModelError = message || "runModel threw without an error message";
     }
 
-    // The run's outcome lives on the runner's own data, not in this process.
-    const runRecords = await ctx.readModelData?.(
-      AGENT_TASK_INSTANCE,
-      "run",
-    ) ?? [];
-    const latest = runRecords[runRecords.length - 1]?.attributes ?? {};
-    const stdout = typeof latest.stdout === "string" ? latest.stdout : "";
-    const stderr = typeof latest.stderr === "string" ? latest.stderr : "";
-    const exitCode = typeof latest.exitCode === "number" ? latest.exitCode : 1;
-    if (exitCode !== 0) {
-      ctx.logger.error(`Review agent exited with code ${exitCode}: ${stderr}`);
+    let record: DataRecord | undefined;
+    try {
+      record = await readAgentRunRecord(ctx, actor);
+    } catch (error) {
+      ctx.logger.warn("Could not read the exact agent-task run record", {
+        actor,
+        error: String(error),
+      });
     }
-
     let verdictFileText = "";
     try {
       verdictFileText = await Deno.readTextFile(verdictPath);
     } catch {
       // Agent wrote nothing to the durable file; stdout parsing still applies.
     }
-
-    return { stdout, stderr, exitCode, verdictFileText };
+    const run = agentRunFromRecord(record, verdictFileText);
+    if (runModelError !== undefined) {
+      run.runnerError = runModelError;
+    }
+    if (run.runnerError) {
+      run.exitCode = run.exitCode === 0 ? 1 : run.exitCode;
+      run.stderr = [run.stderr, `agent-task run failed: ${run.runnerError}`]
+        .filter(Boolean)
+        .join("\n");
+    }
+    if (run.exitCode !== 0) {
+      ctx.logger.error(
+        `Review agent exited with code ${run.exitCode}: ${run.stderr}`,
+      );
+    }
+    return run;
   } finally {
     try {
       await Deno.remove(verdictDir, { recursive: true });
@@ -647,13 +721,12 @@ export function parseReportForVerdicts(
     const line = raw.replace(/\*\*/g, "");
     const match = line.match(/PR\s+#(\d+)\s*(:|[—–-])\s*(\S+)(.*)/i);
     if (match) {
-      const colon = match[2] === ":";
       const number = parseInt(match[1], 10);
       // Agents routinely end verdicts and notes with sentence punctuation
       // ("merged.", "merged: main moved on"). Strip trailing punctuation
       // from the verdict token so "merged." still resolves to "merged".
       const verdict = match[3].toLowerCase().replace(/[.,;:]+$/, "");
-      if (!colon && !PR_ACTIONS.includes(verdict)) continue;
+      if (!PR_ACTIONS.includes(verdict)) continue;
       const reason = (match[4]?.trim() ?? "").replace(/[.,;:]+$/, "") ||
         undefined;
       verdicts.set(number, { verdict, reason });
@@ -1186,6 +1259,33 @@ async function resolveRepoPair(
   return { workdir, model: registered?.model ?? "" };
 }
 
+export async function assertUsableCheckout(
+  workdir: string,
+  ctx: Pick<ModelContext, "signal">,
+): Promise<void> {
+  let isDir = false;
+  try {
+    isDir = Deno.statSync(workdir).isDirectory;
+  } catch {
+    isDir = false;
+  }
+  if (!isDir) {
+    throw new Error(
+      `review: workdir \`${workdir}\` is not a directory — pass workdir= or register the pair in pr-sweep-config`,
+    );
+  }
+  const inside = await runGit(
+    workdir,
+    ["rev-parse", "--is-inside-work-tree"],
+    ctx.signal,
+  );
+  if (!inside.ok || inside.stdout !== "true") {
+    throw new Error(
+      `review: workdir \`${workdir}\` is not a git work tree — point it at a repository checkout`,
+    );
+  }
+}
+
 /** Durably read the newest `open-prs-current`, or null when absent/unparsable. */
 async function readOpenPrs(ctx: ModelContext): Promise<OpenPrsRecord | null> {
   if (!ctx.readModelData) {
@@ -1378,6 +1478,8 @@ async function stepReview(
   reviewed: number[];
   verdicts: Record<string, string>;
   unreviewed: number[];
+  agentExitCode: number;
+  runnerError?: string;
   dataHandles: Array<{ name: string }>;
 }> {
   const current = await readOpenPrs(ctx);
@@ -1411,6 +1513,7 @@ async function stepReview(
 
   const pair = await resolveRepoPair(ctx, repo, args.workdir);
   const workdir = pair.workdir;
+  await assertUsableCheckout(workdir, ctx);
   const model = settings.model || pair.model;
   const systemPromptPath = resolveSweeperPromptPath(
     {
@@ -1483,13 +1586,19 @@ async function stepReview(
     number,
     { status: PrSyncStatus; detail?: string }
   >();
-  if (args.resyncBehind !== false) {
+  const syncTargets = reviewSyncTargets(batch, verdicts, run);
+  if (args.resyncBehind !== false && syncTargets.length > 0) {
     try {
       const syncRepo: SyncRepo = { ...repo, workdir, ...settings };
-      const synced = await resyncBehindPrs(syncRepo, batch, stateByNumber, ctx);
+      const synced = await resyncBehindPrs(
+        syncRepo,
+        syncTargets,
+        stateByNumber,
+        ctx,
+      );
       syncResults = await verifySyncedPrs(
         syncRepo,
-        batch,
+        syncTargets,
         stateByNumber,
         synced,
         ctx,
@@ -1504,12 +1613,17 @@ async function stepReview(
   const now = new Date().toISOString();
   const handles: Array<{ name: string }> = [];
   const verdictByName: Record<string, string> = {};
+  const reviewed = requested.filter((number) => verdicts.has(number));
   for (const pr of batch) {
-    const verdictInfo = verdicts.get(pr.number) ?? { verdict: "unknown" };
     const state = stateByNumber.get(pr.number) ?? { ...UNKNOWN_PR_STATE };
     const sync = syncResults.get(pr.number);
     const name = prInstanceName(repo.upstreamRepo, pr.number);
     const prior = await readPrResource(ctx, name);
+    const freshVerdict = verdicts.get(pr.number);
+    const verdictInfo = freshVerdict ?? {
+      verdict: prior?.verdict ?? "unknown",
+      reason: prior?.reason,
+    };
     verdictByName[String(pr.number)] = verdictInfo.verdict;
     handles.push(
       await ctx.writeResource(
@@ -1522,10 +1636,13 @@ async function stepReview(
           forkRepo: repo.forkRepo,
           verdict: verdictInfo.verdict,
           reason: verdictInfo.reason,
-          merged: state.merged || verdictInfo.verdict === "merged",
+          agentExitCode: run.exitCode,
+          runnerError: run.runnerError,
+          merged: state.merged || verdictInfo.verdict === "merged" ||
+            prior?.merged === true,
           state: state.state,
           mergeStateStatus: state.mergeStateStatus,
-          reviewedAt: now,
+          reviewedAt: freshVerdict ? now : prior?.reviewedAt,
           syncStatus: sync?.status,
           syncDetail: sync?.detail,
         }),
@@ -1533,15 +1650,17 @@ async function stepReview(
     );
   }
 
-  const unreviewed = [...byNumber.keys()].filter((n) => !requested.includes(n));
+  const unreviewed = [...byNumber.keys()].filter((n) => !reviewed.includes(n));
   ctx.logger.info(
-    `review: ${batch.length} PR(s) reviewed; ${unreviewed.length} still pending`,
+    `review: ${reviewed.length}/${batch.length} PR(s) reported; ${unreviewed.length} still pending`,
     { verdicts: verdictByName },
   );
   return {
-    reviewed: requested,
+    reviewed,
     verdicts: verdictByName,
     unreviewed,
+    agentExitCode: run.exitCode,
+    ...(run.runnerError ? { runnerError: run.runnerError } : {}),
     dataHandles: handles,
   };
 }
@@ -1650,6 +1769,7 @@ async function stepVerdicts(
 async function stepSummary(
   args: StepArgsInput,
   ctx: ModelContext,
+  review?: { agentExitCode: number; runnerError?: string },
 ): Promise<{ dataHandles: Array<{ name: string }> }> {
   const current = await readOpenPrs(ctx);
   const { repo } = normalizeRun(withQueueRepoPair(args, current));
@@ -1662,10 +1782,21 @@ async function stepSummary(
     records.push(prior ?? mergePrFields(null, listed, {}));
   }
   const tally = tallyPrs(records);
+  const reviewFailed = review && reviewRunFailed({
+    exitCode: review.agentExitCode,
+    runnerError: review.runnerError,
+  });
   const reportLines = [
     `# PR sweep summary — ${repo.upstreamRepo}`,
     "",
     `Listed: ${records.length} · Merged: ${tally.mergedCount} · Skipped: ${tally.skippedCount} · Failed: ${tally.failedCount} · Pending: ${tally.pendingCount}`,
+    ...(reviewFailed
+      ? [
+        `Agent review failed (exit code ${review.agentExitCode}): ${
+          review.runnerError ?? "agent returned a nonzero exit"
+        }`,
+      ]
+      : []),
     "",
     "| PR | Verdict | State | Sync | Note |",
     "| -- | ------- | ----- | ---- | ---- |",
@@ -1681,6 +1812,8 @@ async function stepSummary(
     sweptAt: new Date().toISOString(),
     prCount: records.length,
     ...tally,
+    agentExitCode: review?.agentExitCode,
+    runnerError: review?.runnerError,
     report: reportLines.join("\n"),
     truncated: current?.truncated ?? false,
   });
@@ -1730,11 +1863,23 @@ async function sweepAll(
     });
     return { dataHandles: [handle] };
   }
-  await stepReview(
+  const review = await stepReview(
     { ...stepArgs, numbers: listed.prs.map((pr) => pr.number) },
     ctx,
   );
-  const summary = await stepSummary(stepArgs, ctx);
+  const summary = await stepSummary(stepArgs, ctx, review);
+  if (
+    reviewRunFailed({
+      exitCode: review.agentExitCode,
+      runnerError: review.runnerError,
+    })
+  ) {
+    throw new Error(
+      `PR review failed (exit code ${review.agentExitCode})${
+        review.runnerError ? `: ${review.runnerError}` : ""
+      }; partial results were saved to the sweep summary`,
+    );
+  }
   return {
     dataHandles: [...listed.dataHandles, ...summary.dataHandles],
   };
@@ -1742,7 +1887,7 @@ async function sweepAll(
 
 export const model = {
   type: "@maphew/pr-sweep",
-  version: "2026.10.23.1",
+  version: "2026.11.08.1",
   globalArguments: z.object({}),
   upgrades: [
     {
@@ -1761,6 +1906,12 @@ export const model = {
       toVersion: "2026.10.23.1",
       description:
         "Add an optional `model` to the repo pair and step arguments (and to the registered pr-sweep-config pair), passed through to every review and sweep agent invocation; empty keeps the agent's default",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.11.08.1",
+      description:
+        "Correlate each review with its own full-UUID agent run, query only that run record, preserve verdict-file results when the run record is unavailable, and validate the review checkout",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -1803,7 +1954,22 @@ export const model = {
           "Run the deterministic branch-sync pass after the agent finishes (turn off to sync separately)",
         ),
       }),
-      execute: stepReview,
+      execute: async (args: StepArgsInput, ctx: ModelContext) => {
+        const result = await stepReview(args, ctx);
+        if (
+          reviewRunFailed({
+            exitCode: result.agentExitCode,
+            runnerError: result.runnerError,
+          })
+        ) {
+          throw new Error(
+            `PR review failed (exit code ${result.agentExitCode})${
+              result.runnerError ? `: ${result.runnerError}` : ""
+            }; partial per-PR results were saved`,
+          );
+        }
+        return result;
+      },
     },
     sync: {
       description:
