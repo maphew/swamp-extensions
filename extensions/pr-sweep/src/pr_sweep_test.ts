@@ -11,6 +11,7 @@ import {
   combineVerifyResult,
   derivePrState,
   mergeVerdicts,
+  mintReviewWorktree,
   model,
   parseRemoteRepo,
   parseReportForVerdicts,
@@ -601,9 +602,12 @@ Deno.test("runAgent preserves verdicts when the runner reports failure", async (
   const systemPromptPath = `${tempDir}/system-prompt.md`;
   await Deno.writeTextFile(systemPromptPath, "system prompt");
   let verdictPath = "";
+  let agentWorkdir = "";
+  let disposed = false;
   const run = await runAgent(
     {
       runModel: async (options) => {
+        agentWorkdir = String(options.arguments?.workdir ?? "");
         const prompt = String(options.arguments?.prompt ?? "");
         verdictPath = prompt.match(
           /append exactly one line to `([^`]+)`/i,
@@ -627,9 +631,19 @@ Deno.test("runAgent preserves verdicts when the runner reports failure", async (
     },
     [{ number: 7040, title: "Fix" }],
     systemPromptPath,
+    () =>
+      Promise.resolve({
+        path: `${tempDir}/review-worktree`,
+        dispose: () => {
+          disposed = true;
+          return Promise.resolve();
+        },
+      }),
   );
 
   try {
+    assertEquals(agentWorkdir, `${tempDir}/review-worktree`);
+    assertEquals(disposed, true);
     assertEquals(verdictPath.length > 0, true);
     assertEquals(run.exitCode, 1);
     assertEquals(
@@ -644,6 +658,57 @@ Deno.test("runAgent preserves verdicts when the runner reports failure", async (
     );
   } finally {
     await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("mintReviewWorktree isolates a review from the operator checkout", async () => {
+  const root = await Deno.makeTempDir({ prefix: "pr-sweep-mint-test-" });
+  const checkout = `${root}/checkout`;
+  const git = (args: string[], cwd: string) =>
+    new Deno.Command("git", {
+      args,
+      cwd,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+  try {
+    await Deno.mkdir(checkout);
+    await git(["init", "-q"], checkout);
+    await git(["config", "user.email", "test@example.com"], checkout);
+    await git(["config", "user.name", "Test"], checkout);
+    await Deno.writeTextFile(`${checkout}/README.md`, "hello\n");
+    await git(["add", "README.md"], checkout);
+    await git(["commit", "-q", "-m", "init"], checkout);
+
+    const review = await mintReviewWorktree(checkout);
+    try {
+      assertEquals(review.path.includes("swamp-pr-sweep-review-"), true);
+      const marker = `${review.path}/agent-wrote-this.txt`;
+      await Deno.writeTextFile(marker, "work\n");
+      assertEquals(
+        await Deno.readTextFile(`${checkout}/agent-wrote-this.txt`)
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      const listed = new TextDecoder().decode(
+        (await git(["worktree", "list", "--porcelain"], checkout)).stdout,
+      );
+      assertEquals(listed.includes(review.path), true);
+    } finally {
+      await review.dispose();
+      await review.dispose();
+    }
+    assertEquals(
+      await Deno.stat(review.path).then(() => true).catch(() => false),
+      false,
+    );
+    const after = new TextDecoder().decode(
+      (await git(["worktree", "list", "--porcelain"], checkout)).stdout,
+    );
+    assertEquals(after.includes(review.path), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
   }
 });
 

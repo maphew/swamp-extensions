@@ -177,6 +177,7 @@ const GlobalArgsSchema = z.object({
   ),
   tempGlobs: z.array(z.string()).default([
     "beads-bd-tests-*",
+    "swamp-pr-sweep-*",
     "*.tmp",
     "*.swp",
     "*.orig",

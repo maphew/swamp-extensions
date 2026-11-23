@@ -496,9 +496,75 @@ export function buildReviewPrompt(
 }
 
 /**
+ * A working directory a review agent runs in, plus how to release it. `dispose`
+ * must be safe to call after a failed run, so a crashed sweep does not leak the
+ * registration.
+ */
+export type ReviewCheckout = {
+  path: string;
+  dispose: () => Promise<void>;
+};
+
+/** Injected in tests so a review batch can run without a real git checkout. */
+export type MintReviewCheckout = (checkout: string) => Promise<ReviewCheckout>;
+
+/**
+ * Mint a throwaway worktree so a review batch never mutates the operator's
+ * checkout. A sweep mutates its workdir (`gh pr checkout`, agent commits), and
+ * one worktree per review call is what lets N PR workers run in parallel: two
+ * calls no longer share the checkout ceph keys collisions on. Mirrors
+ * `resyncBehindPrs`: temp dir under `$TMPDIR`, detached worktree off the
+ * checkout, removed in `finally`.
+ *
+ * A leaked directory (SIGKILL) is reported by housekeeping's `swamp-pr-sweep-*`
+ * temp glob; `git worktree prune` reclaims the stale registration.
+ */
+export async function mintReviewWorktree(
+  checkout: string,
+  signal?: AbortSignal,
+): Promise<ReviewCheckout> {
+  const root = await Deno.makeTempDir({ prefix: "swamp-pr-sweep-review-" });
+  const path = `${root}/wt`;
+  const added = await runGit(
+    checkout,
+    ["worktree", "add", "--detach", "--force", path, "HEAD"],
+    signal,
+  );
+  if (!added.ok) {
+    try {
+      await Deno.remove(root, { recursive: true });
+    } catch {
+      // best effort
+    }
+    throw new Error(
+      `review: could not create an isolated worktree from ${checkout}: ${added.stderr}`,
+    );
+  }
+  let disposed = false;
+  return {
+    path,
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      try {
+        await runGit(checkout, ["worktree", "remove", "--force", path]);
+      } catch {
+        // best effort
+      }
+      try {
+        await Deno.remove(root, { recursive: true });
+      } catch {
+        // best effort
+      }
+    },
+  };
+}
+
+/**
  * Run one review batch through `@maphew/agent-task`'s `run` method, which owns
- * how a headless agent is launched. pr-sweep owns the prompt, the batch and
- * the durable verdict file; it does not own the invocation.
+ * how a headless agent is launched. pr-sweep owns the prompt, the batch, the
+ * throwaway worktree the agent mutates, and the durable verdict file; it does
+ * not own the invocation.
  *
  * A non-zero exit is reported to the caller but does not throw: a review that
  * timed out can still have written verdicts for the PRs it did finish, and
@@ -514,8 +580,10 @@ export async function runAgent(
   },
   prs: Array<{ number: number; title: string }>,
   systemPromptPath: string,
+  mint: MintReviewCheckout = mintReviewWorktree,
 ): Promise<AgentRun> {
   const systemPrompt = await Deno.readTextFile(systemPromptPath);
+  const reviewCheckout = await mint(repo.workdir);
   const verdictDir = await Deno.makeTempDir({
     prefix: "swamp-pr-sweep-verdicts-",
   });
@@ -541,7 +609,7 @@ export async function runAgent(
         arguments: {
           prompt: taskPrompt,
           systemPrompt,
-          workdir: repo.workdir,
+          workdir: reviewCheckout.path,
           agent: repo.agent,
           model: repo.model,
           actor,
@@ -593,6 +661,7 @@ export async function runAgent(
     } catch {
       // best effort
     }
+    await reviewCheckout.dispose();
   }
 }
 

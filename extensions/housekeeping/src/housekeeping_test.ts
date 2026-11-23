@@ -130,6 +130,10 @@ Deno.test("globToRegExp anchors and escapes", () => {
 });
 
 Deno.test("matchesGlob handles question marks", () => {
+  assertEquals(
+    matchesGlob("swamp-pr-sweep-review-abc", "swamp-pr-sweep-*"),
+    true,
+  );
   assertEquals(matchesGlob("tmp1", "tmp?"), true);
   assertEquals(matchesGlob("tmp12", "tmp?"), false);
 });
