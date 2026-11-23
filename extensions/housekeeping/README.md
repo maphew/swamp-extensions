@@ -105,7 +105,7 @@ Global arguments (per model instance):
 | `bdBin`           | `bd`                                 | Beads binary name or path                           |
 | `staleClaimDays`  | `7`                                  | Idle age after which a claim is reported stale      |
 | `staleTempHours`  | `24`                                 | Age after which matched temp debris is stale        |
-| `tempGlobs`       | `beads-bd-tests-*`, `*.tmp`, `*.swp`, `*.orig`, `*.rej` | One-level globs matched under the temp roots |
+| `tempGlobs`       | `beads-bd-tests-*`, `swamp-pr-sweep-*`, `*.tmp`, `*.swp`, `*.orig`, `*.rej` | One-level globs matched under the temp roots |
 | `tempRoots`       | `[]` → `$TMPDIR` + `projectDir`      | Directories scanned for temp debris                 |
 | `processPatterns` | `["dolt sql-server"]`                | `pgrep -af` patterns; empty disables                |
 | `includeBeads`    | `true`                               | Tracker checks when `.beads/` is present            |

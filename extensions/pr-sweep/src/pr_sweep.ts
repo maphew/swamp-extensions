@@ -506,7 +506,10 @@ export type ReviewCheckout = {
 };
 
 /** Injected in tests so a review batch can run without a real git checkout. */
-export type MintReviewCheckout = (checkout: string) => Promise<ReviewCheckout>;
+export type MintReviewCheckout = (
+  checkout: string,
+  signal?: AbortSignal,
+) => Promise<ReviewCheckout>;
 
 /**
  * Mint a throwaway worktree so a review batch never mutates the operator's
@@ -516,8 +519,10 @@ export type MintReviewCheckout = (checkout: string) => Promise<ReviewCheckout>;
  * `resyncBehindPrs`: temp dir under `$TMPDIR`, detached worktree off the
  * checkout, removed in `finally`.
  *
- * A leaked directory (SIGKILL) is reported by housekeeping's `swamp-pr-sweep-*`
- * temp glob; `git worktree prune` reclaims the stale registration.
+ * Cleanup is best-effort and idempotent. A directory left by a SIGKILL is
+ * reported by housekeeping's `swamp-pr-sweep-*` temp glob; reclaim it with
+ * `rm -rf <dir>` followed by `git worktree prune` (`prune` alone leaves an
+ * orphan whose directory still exists).
  */
 export async function mintReviewWorktree(
   checkout: string,
@@ -525,19 +530,34 @@ export async function mintReviewWorktree(
 ): Promise<ReviewCheckout> {
   const root = await Deno.makeTempDir({ prefix: "swamp-pr-sweep-review-" });
   const path = `${root}/wt`;
-  const added = await runGit(
-    checkout,
-    ["worktree", "add", "--detach", "--force", path, "HEAD"],
-    signal,
-  );
-  if (!added.ok) {
+  const discard = async () => {
     try {
       await Deno.remove(root, { recursive: true });
     } catch {
       // best effort
     }
+    try {
+      await runGit(checkout, ["worktree", "prune"]);
+    } catch {
+      // best effort
+    }
+  };
+  let added: GitResult;
+  try {
+    added = await runGit(
+      checkout,
+      ["worktree", "add", "--detach", "--force", path, "HEAD"],
+      signal,
+    );
+  } catch (error) {
+    await discard();
+    throw error;
+  }
+  if (!added.ok) {
+    const detail = added.stderr;
+    await discard();
     throw new Error(
-      `review: could not create an isolated worktree from ${checkout}: ${added.stderr}`,
+      `review: could not create an isolated worktree from ${checkout}: ${detail}`,
     );
   }
   let disposed = false;
@@ -571,7 +591,9 @@ export async function mintReviewWorktree(
  * those are what the caller records.
  */
 export async function runAgent(
-  ctx: Pick<ModelContext, "runModel" | "queryData" | "logger">,
+  ctx: Pick<ModelContext, "runModel" | "queryData" | "logger"> & {
+    signal?: AbortSignal;
+  },
   repo: Pick<Repo, "upstreamRepo" | "forkRepo" | "workdir"> & {
     agent: RunSettings["agent"];
     model: RunSettings["model"];
@@ -583,12 +605,14 @@ export async function runAgent(
   mint: MintReviewCheckout = mintReviewWorktree,
 ): Promise<AgentRun> {
   const systemPrompt = await Deno.readTextFile(systemPromptPath);
-  const reviewCheckout = await mint(repo.workdir);
   const verdictDir = await Deno.makeTempDir({
     prefix: "swamp-pr-sweep-verdicts-",
   });
   const verdictPath = `${verdictDir}/verdicts.txt`;
+  let reviewCheckout: ReviewCheckout | undefined;
   try {
+    reviewCheckout = await mint(repo.workdir, ctx.signal);
+    const workdir = reviewCheckout.path;
     const taskPrompt = buildReviewPrompt(repo, prs, {
       updateStrategy: repo.updateStrategy,
       verdictPath,
@@ -609,7 +633,7 @@ export async function runAgent(
         arguments: {
           prompt: taskPrompt,
           systemPrompt,
-          workdir: reviewCheckout.path,
+          workdir,
           agent: repo.agent,
           model: repo.model,
           actor,
@@ -661,7 +685,7 @@ export async function runAgent(
     } catch {
       // best effort
     }
-    await reviewCheckout.dispose();
+    if (reviewCheckout) await reviewCheckout.dispose();
   }
 }
 

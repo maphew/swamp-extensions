@@ -676,6 +676,7 @@ Deno.test("mintReviewWorktree isolates a review from the operator checkout", asy
     await git(["init", "-q"], checkout);
     await git(["config", "user.email", "test@example.com"], checkout);
     await git(["config", "user.name", "Test"], checkout);
+    await git(["config", "commit.gpgsign", "false"], checkout);
     await Deno.writeTextFile(`${checkout}/README.md`, "hello\n");
     await git(["add", "README.md"], checkout);
     await git(["commit", "-q", "-m", "init"], checkout);
@@ -709,6 +710,70 @@ Deno.test("mintReviewWorktree isolates a review from the operator checkout", asy
     assertEquals(after.includes(review.path), false);
   } finally {
     await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("mintReviewWorktree fails named when the checkout is not a git tree", async () => {
+  const checkout = await Deno.makeTempDir({ prefix: "pr-sweep-nogit-" });
+  try {
+    let message = "";
+    try {
+      await mintReviewWorktree(checkout);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    assertEquals(
+      message.includes("could not create an isolated worktree"),
+      true,
+    );
+  } finally {
+    await Deno.remove(checkout, { recursive: true });
+  }
+});
+
+Deno.test("runAgent disposes the review worktree when the runner throws", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "pr-sweep-runner-throw-" });
+  const systemPromptPath = `${tempDir}/system-prompt.md`;
+  await Deno.writeTextFile(systemPromptPath, "system prompt");
+  let disposed = false;
+  try {
+    let runnerError = "";
+    try {
+      await runAgent(
+        {
+          runModel: () => {
+            throw new Error("runner exploded");
+          },
+          queryData: () => Promise.resolve([]),
+          logger: { info: () => {}, warn: () => {}, error: () => {} },
+        },
+        {
+          upstreamRepo: "owner/repo",
+          forkRepo: "fork/repo",
+          workdir: `${tempDir}/repo`,
+          agent: "kilo",
+          model: "",
+          mainBranch: "main",
+          updateStrategy: "merge",
+        },
+        [{ number: 7040, title: "Fix" }],
+        systemPromptPath,
+        () =>
+          Promise.resolve({
+            path: `${tempDir}/review-worktree`,
+            dispose: () => {
+              disposed = true;
+              return Promise.resolve();
+            },
+          }),
+      );
+    } catch (error) {
+      runnerError = error instanceof Error ? error.message : String(error);
+    }
+    assertEquals(runnerError, "");
+    assertEquals(disposed, true);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
   }
 });
 

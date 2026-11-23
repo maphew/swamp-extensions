@@ -161,6 +161,20 @@ const AuditSchema = z.object({
   findings: z.array(FindingSchema),
 });
 
+/**
+ * Default debris patterns. `swamp-pr-sweep-*` covers the throwaway worktrees
+ * and verdict dirs pr-sweep mints under `$TMPDIR`, which a SIGKILLed sweep
+ * leaves behind.
+ */
+export const DEFAULT_TEMP_GLOBS = [
+  "beads-bd-tests-*",
+  "swamp-pr-sweep-*",
+  "*.tmp",
+  "*.swp",
+  "*.orig",
+  "*.rej",
+];
+
 const GlobalArgsSchema = z.object({
   projectDir: z.string().default(".").describe(
     "Repository root to audit. Defaults to the current directory so the model stays portable.",
@@ -175,14 +189,9 @@ const GlobalArgsSchema = z.object({
   staleTempHours: z.number().default(24).describe(
     "Age (hours) after which matched temp debris is reported stale",
   ),
-  tempGlobs: z.array(z.string()).default([
-    "beads-bd-tests-*",
-    "swamp-pr-sweep-*",
-    "*.tmp",
-    "*.swp",
-    "*.orig",
-    "*.rej",
-  ]).describe("Glob patterns matched (one level deep) under the temp roots"),
+  tempGlobs: z.array(z.string()).default(DEFAULT_TEMP_GLOBS).describe(
+    "Glob patterns matched (one level deep) under the temp roots",
+  ),
   tempRoots: z.array(z.string()).default([]).describe(
     "Directories scanned for temp debris. Empty means $TMPDIR and projectDir.",
   ),

@@ -120,10 +120,11 @@ swamp data query 'modelName == "pr-sweep" && name == "summary-current"' --select
 ## How a sweep works
 
 1. `gh pr list --limit 1000` lists open PRs whose head repository is the fork.
-2. The agent runs in the upstream checkout with the bundled sweeper prompt. As
-   each PR finishes, the agent appends one `PR #<n>: <action>` line to a durable
-   file; a truncated closing message can no longer lose verdicts. stdout is the
-   fallback.
+2. The agent runs in a throwaway worktree minted from the upstream checkout, so
+   a sweep never mutates the operator's checkout and concurrent review batches
+   do not share one. As each PR finishes, the agent appends one
+   `PR #<n>: <action>` line to a durable file; a truncated closing message can
+   no longer lose verdicts. stdout is the fallback.
 3. Each PR's post-run state is read (`gh pr view`).
 4. If `resyncBehind` is set, a base-move pass re-fetches each PR's base branch
    and brings behind branches up to date in a throwaway worktree (the operator's

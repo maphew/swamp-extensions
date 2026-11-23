@@ -32,19 +32,32 @@ asking for input.
 
 For **every** open PR in the list:
 
-1. **Checkout** the PR's head branch (`gh pr checkout <number>`), ensuring you
-   are working from a clean state.
+1. **Checkout** the PR detached: `gh pr checkout <number> --detach`. You are in
+   your own throwaway worktree, and a detached HEAD owns no branch name, so
+   concurrent sweeps of other PRs (or the operator's checkout) cannot collide
+   with "already used by worktree". If that PR's branch is dirty from a prior
+   step, reset it; never leave uncommitted edits behind.
 2. **Bring the branch up to date with the base branch**, following the update
    strategy named in the task:
    - `merge` (default):
      `git fetch <base-remote> <baseRefName> && git merge <base-remote>/<baseRefName>`.
-     The merge commit fast-forwards, so push normally and **never force-push**.
+     The merge commit fast-forwards, so the refspec push below needs no force —
+     **never force-push** on this strategy.
    - `rebase`:
      `git fetch <base-remote> <baseRefName> && git rebase <base-remote>/<baseRefName>`,
      then push with `--force-with-lease` (never bare `--force`).
    Use the remote that points at the upstream repo — usually `upstream`; `origin`
    is your fork and its main can be far behind. Resolve conflicts yourself; if
    you cannot, stop and report.
+
+   Because HEAD is detached, push with an explicit refspec to the PR's own head
+   branch on the fork remote (usually `origin`):
+
+       git push <fork-remote> HEAD:<headRefName>
+       # rebase strategy:
+       git push --force-with-lease <fork-remote> HEAD:<headRefName>
+
+   Never push to `main` or another PR's branch.
    Fetch immediately before each PR's update — right before the merge/rebase
    for that PR, not once at the start of the run. A fetch from run start goes
    stale on a busy upstream over a long sweep.
@@ -55,8 +68,10 @@ For **every** open PR in the list:
      and incomplete documentation.
    - Raise each finding as a **comment on the PR** (`gh pr review --comment
      -b "<finding>"`), specific and actionable.
-   - **Address each finding** by committing a fix on the branch. Rebut a
-     finding only with a reasoned comment when the finding is wrong.
+   - **Address each finding** by committing a fix, then push it to the PR's
+     head branch with the same refspec (`git push <fork-remote>
+     HEAD:<headRefName>`). Rebut a finding only with a reasoned comment when
+     the finding is wrong.
    - When review is complete and all findings are addressed, convert the draft
      to ready: `gh pr ready <number>`.
 4. **Check status checks.** Wait for CI to pass (`gh pr view <number> --json

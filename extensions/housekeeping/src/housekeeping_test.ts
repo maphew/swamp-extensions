@@ -10,6 +10,7 @@ import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
   baseName,
   countStatusFiles,
+  DEFAULT_TEMP_GLOBS,
   globToRegExp,
   isExpired,
   isOlderThan,
@@ -122,6 +123,16 @@ Deno.test("parseStashList splits ref, date, and subject", () => {
   assertEquals(stashes[1].subject, "On wip: a|b");
 });
 
+Deno.test("DEFAULT_TEMP_GLOBS reports leaked pr-sweep worktrees", () => {
+  assertEquals(DEFAULT_TEMP_GLOBS.includes("swamp-pr-sweep-*"), true);
+  assertEquals(
+    DEFAULT_TEMP_GLOBS.some((g) =>
+      matchesGlob("swamp-pr-sweep-review-abc123", g)
+    ),
+    true,
+  );
+});
+
 Deno.test("globToRegExp anchors and escapes", () => {
   assertEquals(globToRegExp("beads-bd-tests-*").test("beads-bd-tests-x"), true);
   assertEquals(globToRegExp("*.tmp").test("x.tmp"), true);
@@ -130,10 +141,6 @@ Deno.test("globToRegExp anchors and escapes", () => {
 });
 
 Deno.test("matchesGlob handles question marks", () => {
-  assertEquals(
-    matchesGlob("swamp-pr-sweep-review-abc", "swamp-pr-sweep-*"),
-    true,
-  );
   assertEquals(matchesGlob("tmp1", "tmp?"), true);
   assertEquals(matchesGlob("tmp12", "tmp?"), false);
 });
